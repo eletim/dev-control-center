@@ -112,7 +112,10 @@ export function createAppServer(store, processManager = new ProjectProcessManage
     } catch (error) {
       if (error instanceof ProjectError) {
         const conflicts = ['duplicate_path', 'already_running', 'not_running', 'project_running'];
-        sendJson(response, error.code === 'not_found' ? 404 : conflicts.includes(error.code) ? 409 : 400, {
+        const status = error.code === 'not_found' ? 404
+          : error.code === 'shutting_down' ? 503
+            : conflicts.includes(error.code) ? 409 : 400;
+        sendJson(response, status, {
           error: error.code,
           message: error.message,
         });

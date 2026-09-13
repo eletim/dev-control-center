@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { ProjectError } from './project-store.js';
 
@@ -15,7 +15,15 @@ export class ProjectProcessManager {
     this.startupDelay = startupDelay;
     this.stopTimeout = stopTimeout;
     this.pollInterval = pollInterval;
-    this.#load();
+    this.acceptingLifecycleWork = true;
+    this.lockOwner = null;
+    if (this.stateFile) this.#acquireStateLock();
+    try {
+      this.#load();
+    } catch (error) {
+      this.releaseStateLock();
+      throw error;
+    }
   }
 
   async withProjectLock(id, operation) {
@@ -39,14 +47,17 @@ export class ProjectProcessManager {
   }
 
   start(project) {
+    this.#requireLifecycleWork();
     return this.withProjectLock(project.id, () => this.#start(project));
   }
 
   stop(id) {
+    this.#requireLifecycleWork();
     return this.withProjectLock(id, () => this.#stop(id, true));
   }
 
   restart(project) {
+    this.#requireLifecycleWork();
     return this.withProjectLock(project.id, async () => {
       await this.#stop(project.id, false);
       await this.#start(project);
@@ -54,6 +65,7 @@ export class ProjectProcessManager {
   }
 
   perform(id, action, getProject) {
+    this.#requireLifecycleWork();
     return this.withProjectLock(id, async () => {
       const project = await getProject();
       if (!project) throw new ProjectError('not_found', 'Project not found.');
@@ -71,6 +83,34 @@ export class ProjectProcessManager {
     await Promise.all([...this.processes.keys()].map((id) => (
       this.withProjectLock(id, () => this.#stop(id, false))
     )));
+  }
+
+  beginShutdown() {
+    this.acceptingLifecycleWork = false;
+  }
+
+  async drain() {
+    await Promise.all([...this.queues.values()]);
+  }
+
+  releaseStateLock() {
+    if (!this.stateFile || !this.lockOwner) return;
+    const lockPath = `${this.stateFile}.lock`;
+    let currentOwner;
+    try {
+      currentOwner = JSON.parse(readFileSync(path.join(lockPath, 'owner.json'), 'utf8'));
+    } catch {
+      return;
+    }
+    if (currentOwner.pid !== this.lockOwner.pid || currentOwner.startTime !== this.lockOwner.startTime) return;
+    const retiredPath = `${lockPath}.${randomUUID()}.retired`;
+    try {
+      renameSync(lockPath, retiredPath);
+      rmSync(retiredPath, { recursive: true, force: true });
+      this.lockOwner = null;
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
   }
 
   async #start(project) {
@@ -137,6 +177,12 @@ export class ProjectProcessManager {
       process.kill(-processGroupId, signal);
     } catch (error) {
       if (error.code !== 'ESRCH') throw error;
+    }
+  }
+
+  #requireLifecycleWork() {
+    if (!this.acceptingLifecycleWork) {
+      throw new ProjectError('shutting_down', 'The control center is shutting down.');
     }
   }
 
@@ -214,5 +260,63 @@ export class ProjectProcessManager {
     const temporaryPath = `${this.stateFile}.${process.pid}.tmp`;
     writeFileSync(temporaryPath, `${JSON.stringify(records, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
     renameSync(temporaryPath, this.stateFile);
+  }
+
+  #acquireStateLock() {
+    const lockPath = `${this.stateFile}.lock`;
+    const startTime = this.#processStartTime(process.pid);
+    const owner = { pid: process.pid, startTime };
+
+    while (true) {
+      const candidatePath = `${lockPath}.${randomUUID()}.candidate`;
+      mkdirSync(candidatePath, { recursive: true, mode: 0o700 });
+      writeFileSync(path.join(candidatePath, 'owner.json'), JSON.stringify(owner), { encoding: 'utf8', mode: 0o600 });
+      try {
+        renameSync(candidatePath, lockPath);
+        this.lockOwner = owner;
+        return;
+      } catch (error) {
+        rmSync(candidatePath, { recursive: true, force: true });
+        if (!['EEXIST', 'ENOTEMPTY'].includes(error.code)) throw error;
+      }
+
+      if (this.#stateLockIsLive(lockPath)) {
+        throw new Error(`Process state is already controlled by another process: ${this.stateFile}`);
+      }
+
+      const stalePath = `${lockPath}.${randomUUID()}.stale`;
+      try {
+        renameSync(lockPath, stalePath);
+        rmSync(stalePath, { recursive: true, force: true });
+      } catch (error) {
+        if (!['ENOENT', 'EEXIST', 'ENOTEMPTY'].includes(error.code)) throw error;
+      }
+    }
+  }
+
+  #stateLockIsLive(lockPath) {
+    try {
+      const owner = JSON.parse(readFileSync(path.join(lockPath, 'owner.json'), 'utf8'));
+      return Number.isInteger(owner.pid) && typeof owner.startTime === 'string'
+        && this.#processStartTime(owner.pid) === owner.startTime;
+    } catch {
+      return false;
+    }
+  }
+
+  #processStartTime(pid) {
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+      return stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19];
+    } catch {
+      try {
+        process.kill(pid, 0);
+        return `pid:${pid}`;
+      } catch (error) {
+        if (error.code === 'EPERM') return `pid:${pid}`;
+        if (error.code === 'ESRCH') return null;
+        throw error;
+      }
+    }
   }
 }

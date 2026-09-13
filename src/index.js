@@ -14,13 +14,17 @@ let shuttingDown = false;
 async function shutdown() {
   if (shuttingDown) return;
   shuttingDown = true;
-  server.close();
+  processManager.beginShutdown();
   try {
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    await processManager.drain();
     await processManager.stopAll();
     process.exitCode = 0;
   } catch (error) {
     console.error(error);
     process.exitCode = 1;
+  } finally {
+    processManager.releaseStateLock();
   }
 }
 

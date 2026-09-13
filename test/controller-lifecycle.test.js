@@ -24,12 +24,16 @@ async function waitFor(check, timeout = 3000) {
   throw new Error('Timed out waiting for condition.');
 }
 
-async function startController(dataFile, processFile) {
-  const child = spawn(process.execPath, ['src/index.js'], {
+function spawnController(dataFile, processFile) {
+  return spawn(process.execPath, ['src/index.js'], {
     cwd: repositoryPath,
     env: { ...process.env, HOST: '127.0.0.1', PORT: '0', DCC_DATA_FILE: dataFile, DCC_PROCESS_FILE: processFile },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+}
+
+async function startController(dataFile, processFile) {
+  const child = spawnController(dataFile, processFile);
   let output = '';
   child.stdout.on('data', (chunk) => { output += chunk; });
   child.stderr.on('data', (chunk) => { output += chunk; });
@@ -71,6 +75,13 @@ test('reconciles survivors after controller restart and stops groups on graceful
   const started = await fetch(`${first.baseUrl}/api/projects/${project.id}/start`, { method: 'POST' });
   assert.equal(started.status, 200);
   lastProcessGroup = await waitFor(async () => JSON.parse(await readFile(processFile, 'utf8'))[0]?.processGroupId);
+
+  const competingController = spawnController(dataFile, processFile);
+  controllers.push(competingController);
+  const [competingExitCode] = await once(competingController, 'exit');
+  assert.notEqual(competingExitCode, 0);
+  assert.equal(JSON.parse(await readFile(processFile, 'utf8')).length, 1);
+  assert.equal((await fetch(`${first.baseUrl}/api/projects/${project.id}`).then((response) => response.json())).status, 'running');
 
   first.child.kill('SIGKILL');
   await once(first.child, 'exit');

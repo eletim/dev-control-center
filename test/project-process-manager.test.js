@@ -113,3 +113,31 @@ test('rejects commands that fail immediately', async () => {
     assert.equal(manager.isRunning(id), false);
   }
 });
+
+test('shutdown seals lifecycle work, drains a queued start, and stops it', async (t) => {
+  const projectPath = await mkdtemp(path.join(os.tmpdir(), 'dcc-shutdown-'));
+  const project = {
+    id: 'queued-start',
+    path: projectPath,
+    startCommand: `${shellQuote(process.execPath)} -e ${shellQuote('setInterval(() => {}, 1000)')}`,
+  };
+  const manager = new ProjectProcessManager({ stopTimeout: 250 });
+  let releaseMutation;
+  const mutationGate = new Promise((resolve) => { releaseMutation = resolve; });
+  const mutation = manager.withProjectLock(project.id, () => mutationGate);
+  const starting = manager.start(project);
+  t.after(async () => {
+    if (manager.isRunning(project.id)) await manager.stopAll();
+  });
+
+  manager.beginShutdown();
+  assert.throws(() => manager.start({ ...project, id: 'late-start' }), { code: 'shutting_down' });
+  releaseMutation();
+  await mutation;
+  await manager.drain();
+  await starting;
+  assert.equal(manager.isRunning(project.id), true);
+
+  await manager.stopAll();
+  assert.equal(manager.isRunning(project.id), false);
+});
