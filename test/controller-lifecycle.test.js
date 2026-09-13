@@ -100,9 +100,18 @@ test('reconciles tmux windows after controller restart and cleans them up on gra
   controllers.push(alternate.child);
   const withEnvironmentOverride = await fetch(`${alternate.baseUrl}/api/projects/${project.id}`)
     .then((response) => response.json());
-  assert.equal(withEnvironmentOverride.status, 'stopped');
+  assert.equal(withEnvironmentOverride.status, 'running');
   assert.equal(JSON.parse(await readFile(processFile, 'utf8'))[0].sessionName, sessionName);
   assert.equal(await paneExists(lastPane), true);
+  assert.equal((await fetch(`${alternate.baseUrl}/api/projects/${project.id}/start`, { method: 'POST' })).status, 409);
+  assert.equal((await fetch(`${alternate.baseUrl}/api/projects/${project.id}`, { method: 'DELETE' })).status, 409);
+  assert.equal((await fetch(`${alternate.baseUrl}/api/projects/${project.id}/stop`, { method: 'POST' })).status, 200);
+  assert.equal(await paneExists(lastPane), false);
+  assert.equal((await fetch(`${alternate.baseUrl}/api/projects/${project.id}/start`, { method: 'POST' })).status, 200);
+  lastPane = await waitFor(async () => {
+    const [record] = JSON.parse(await readFile(processFile, 'utf8'));
+    return record?.sessionName === alternateSessionName ? record.paneId : null;
+  });
   alternate.child.kill('SIGKILL');
   await once(alternate.child, 'exit');
 

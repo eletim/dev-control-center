@@ -40,7 +40,6 @@ export class ProjectProcessManager {
       throw new Error('The tmux session name may contain only letters, numbers, underscores, and hyphens.');
     }
     this.processes = new Map();
-    this.otherSessionRecords = [];
     this.queues = new Map();
     this.stateFile = stateFile;
     this.sessionName = sessionName;
@@ -406,12 +405,7 @@ export class ProjectProcessManager {
     }
 
     for (const record of records) {
-      if (typeof record.id === 'string' && typeof record.sessionName === 'string'
-        && record.sessionName !== this.sessionName) {
-        this.otherSessionRecords.push(record);
-        continue;
-      }
-      if (typeof record.id !== 'string' || record.sessionName !== this.sessionName
+      if (typeof record.id !== 'string' || typeof record.sessionName !== 'string'
         || typeof record.windowName !== 'string' || typeof record.token !== 'string'
         || record.token.length < 32) continue;
       const base = {
@@ -428,7 +422,7 @@ export class ProjectProcessManager {
           sessionCreated: record.sessionCreated,
           serverPid: record.serverPid,
         });
-        if (pendingWindow?.started) this.processes.set(record.id, pendingWindow.managed);
+        if (pendingWindow?.started) this.#rememberRecoveredProcess(record.id, pendingWindow.managed);
         continue;
       }
       if (!/^\$\d+$/.test(record.sessionId) || !/^@\d+$/.test(record.windowId)
@@ -439,17 +433,21 @@ export class ProjectProcessManager {
         windowId: record.windowId,
         paneId: record.paneId,
       };
-      if (this.#paneState(managed)) this.processes.set(record.id, managed);
+      if (this.#paneState(managed)) this.#rememberRecoveredProcess(record.id, managed);
     }
     this.#persist();
   }
 
+  #rememberRecoveredProcess(id, managed) {
+    if (this.processes.has(id)) {
+      throw new Error(`Multiple live tmux windows are recorded for project ${id}.`);
+    }
+    this.processes.set(id, managed);
+  }
+
   #persist() {
     if (!this.stateFile) return;
-    const records = [
-      ...this.otherSessionRecords,
-      ...[...this.processes.entries()].map(([id, managed]) => ({ id, ...managed })),
-    ];
+    const records = [...this.processes.entries()].map(([id, managed]) => ({ id, ...managed }));
     mkdirSync(path.dirname(this.stateFile), { recursive: true });
     const temporaryPath = `${this.stateFile}.${process.pid}.tmp`;
     writeFileSync(temporaryPath, `${JSON.stringify(records, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
