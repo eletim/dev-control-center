@@ -4,16 +4,29 @@ A minimal local web application for keeping track of development projects.
 
 ## Run
 
-Requires Node.js 20 or newer.
+Requires Node.js 20 or newer and tmux.
 
 ```sh
 ./start.sh
 ```
 
 Open <http://localhost:3000>. Set `HOST`, `PORT`, or `DCC_DATA_FILE` to change
-the listening address, port, or persistent project data file. Process ownership
-is stored beside the project data by default; set `DCC_PROCESS_FILE` to change
-that location.
+the listening address, port, or persistent project data file. tmux window
+ownership is stored beside the project data by default; set `DCC_PROCESS_FILE`
+to change that location.
+
+Start Commands run in project-specific windows in the `dev-control-center` tmux
+session. Attach to the session for direct interaction or to inspect output from
+a command that has exited:
+
+```sh
+tmux attach-session -t dev-control-center
+```
+
+Windows are named automatically from the project directory and project identity.
+Completed and failed windows remain available until the project is started again,
+deleted, or Dev Control Center performs another explicit cleanup action. Set
+`DCC_TMUX_SESSION` to use a different session name.
 
 The default startup path needs no configuration. On its first interactive run,
 `start.sh` offers to create the Git-ignored `config.sh` for a persistent listen

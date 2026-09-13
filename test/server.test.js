@@ -16,16 +16,17 @@ async function withServer(callback) {
   const projectPath = path.join(directory, 'demo');
   await mkdir(projectPath);
   await execFileAsync('git', ['init', '-q', projectPath]);
-  const processManager = new ProjectProcessManager({ stopTimeout: 250 });
+  const processManager = new ProjectProcessManager({
+    stopTimeout: 250,
+    sessionName: `dcc-server-test-${process.pid}-${path.basename(directory)}`,
+  });
   const server = createAppServer(new ProjectStore(path.join(directory, 'projects.json')), processManager);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address();
   try {
     await callback(`http://127.0.0.1:${port}`, projectPath, processManager);
   } finally {
-    for (const id of processManager.processes.keys()) {
-      if (processManager.isRunning(id)) await processManager.stop(id);
-    }
+    await processManager.stopAll();
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
 }
@@ -70,7 +71,7 @@ test('serves the web app and CRUD API with derived fields', async () => {
 });
 
 test('controls project lifecycle and blocks running project mutations', async () => {
-  await withServer(async (baseUrl, projectPath) => {
+  await withServer(async (baseUrl, projectPath, processManager) => {
     const pidFile = path.join(projectPath, 'server.pid');
     const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(`require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000)`)}`;
     const created = await fetch(`${baseUrl}/api/projects`, {
@@ -112,6 +113,9 @@ test('controls project lifecycle and blocks running project mutations', async ()
     const failedStart = await fetch(`${baseUrl}/api/projects/${created.id}/start`, { method: 'POST' });
     assert.equal(failedStart.status, 400);
     assert.equal((await failedStart.json()).error, 'start_failed');
+    assert.equal(processManager.processes.has(created.id), true);
+    assert.equal((await fetch(`${baseUrl}/api/projects/${created.id}`, { method: 'DELETE' })).status, 204);
+    assert.equal(processManager.processes.has(created.id), false);
   });
 });
 
