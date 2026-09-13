@@ -1,0 +1,23 @@
+:root { color-scheme: dark; font-family: system-ui, sans-serif; background: #10131a; color: #edf0f7; }
+body { margin: 0; }
+main { width: min(900px, calc(100% - 2rem)); margin: 3rem auto; }
+header { margin-bottom: 2rem; }
+h1, h2, p { margin-top: 0; }
+.eyebrow { color: #8ba4ff; font-weight: 700; text-transform: uppercase; letter-spacing: .12em; font-size: .75rem; }
+.panel, .project { background: #191e29; border: 1px solid #2a3242; border-radius: 12px; padding: 1.25rem; }
+form { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+label { display: grid; gap: .4rem; font-weight: 600; }
+input { box-sizing: border-box; width: 100%; background: #0f1218; color: inherit; border: 1px solid #3b455a; border-radius: 6px; padding: .7rem; }
+button { border: 0; border-radius: 6px; padding: .7rem 1rem; background: #6c88ff; color: #080b12; font-weight: 700; cursor: pointer; }
+button.secondary { background: #2a3242; color: #edf0f7; }
+.actions { display: flex; gap: .5rem; align-items: end; }
+#message { min-height: 1.25rem; margin: 1rem 0 0; color: #ffacac; }
+.section-heading { display: flex; justify-content: space-between; align-items: center; margin: 2rem 0 1rem; }
+.section-heading h2 { margin: 0; }
+.projects { display: grid; gap: 1rem; }
+.project h3 { margin: 0 0 .4rem; }
+.project code { word-break: break-all; color: #bdc9f5; }
+.meta { color: #aeb7c7; }
+.project .actions { margin-top: 1rem; }
+.empty { color: #aeb7c7; }
+@media (max-width: 650px) { form { grid-template-columns: 1fr; } }
