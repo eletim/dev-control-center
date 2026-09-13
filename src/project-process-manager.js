@@ -2,9 +2,11 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { ProjectError } from './project-store.js';
 
 const processTokenName = 'DEV_CONTROL_CENTER_PROCESS_TOKEN';
+const processSupervisorPath = fileURLToPath(new URL('./process-supervisor.js', import.meta.url));
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 export class ProjectProcessManager {
@@ -119,11 +121,10 @@ export class ProjectProcessManager {
     }
 
     const token = randomUUID();
-    const child = spawn(project.startCommand, {
+    const child = spawn(process.execPath, [processSupervisorPath, project.startCommand], {
       cwd: project.path,
       detached: true,
       env: { ...process.env, [processTokenName]: token },
-      shell: true,
       stdio: 'ignore',
     });
     const managed = {

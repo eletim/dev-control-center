@@ -111,6 +111,30 @@ test('tracks and stops a command that clears its environment', async (t) => {
   await waitFor(() => !pidIsAlive(pid));
 });
 
+test('tracks and stops a server backgrounded by an exiting start command', async (t) => {
+  const projectPath = await mkdtemp(path.join(os.tmpdir(), 'dcc-background-'));
+  const pidFile = path.join(projectPath, 'server.pid');
+  const project = {
+    id: 'background-server',
+    path: projectPath,
+    startCommand: `sleep 20 & echo $! > ${shellQuote(pidFile)}`,
+  };
+  const manager = new ProjectProcessManager({ stopTimeout: 250 });
+  let pid;
+  t.after(async () => {
+    if (manager.isRunning(project.id)) await manager.stopAll();
+    if (pid && pidIsAlive(pid)) process.kill(pid, 'SIGKILL');
+  });
+
+  await manager.start(project);
+  pid = Number(await waitFor(async () => readFile(pidFile, 'utf8')));
+  assert.equal(pidIsAlive(pid), true);
+  assert.equal(manager.isRunning(project.id), true);
+  await assert.rejects(manager.start(project), { code: 'already_running' });
+  await manager.stop(project.id);
+  await waitFor(() => !pidIsAlive(pid));
+});
+
 test('reports stopped when the managed command exits on its own', async () => {
   const projectPath = await mkdtemp(path.join(os.tmpdir(), 'dcc-exit-'));
   const project = {
