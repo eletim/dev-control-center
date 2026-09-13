@@ -149,6 +149,42 @@ test('recovers a command launched after only pending ownership was persisted', a
   assert.equal(JSON.parse(await readFile(stateFile, 'utf8'))[0].pending, undefined);
 });
 
+test('removes a token-owned pending window when its command was not launched', async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'dcc-pending-setup-'));
+  const stateFile = path.join(directory, 'processes.json');
+  const socketName = `dcc-pending-setup-test-${process.pid}`;
+  const sessionName = `dcc-pending-setup-session-${process.pid}`;
+  const pending = {
+    id: 'pending-setup-project',
+    pending: true,
+    sessionName,
+    windowName: 'pending-setup-project-123456789abc',
+    token: '956cf12b-3054-4793-9cb8-7613255b8cd3',
+  };
+  await writeFile(stateFile, `${JSON.stringify([pending], null, 2)}\n`);
+  const paneId = execFileSync('tmux', [
+    '-L', socketName, 'new-session', '-d', '-P', '-F', '#{pane_id}',
+    '-s', sessionName, '-n', pending.windowName,
+  ], { encoding: 'utf8' }).trim();
+  execFileSync('tmux', ['-L', socketName, 'set-option', '-p', '-t', paneId, '@dcc_owner_token', pending.token]);
+
+  const manager = new ProjectProcessManager({ stateFile, sessionName, tmuxSocketName: socketName });
+  t.after(() => {
+    manager.releaseStateLock();
+    try {
+      execFileSync('tmux', ['-L', socketName, 'kill-server'], { stdio: 'ignore' });
+    } catch {
+      // Recovery normally removes the isolated server's only window.
+    }
+  });
+
+  assert.equal(manager.processes.has(pending.id), false);
+  assert.deepEqual(JSON.parse(await readFile(stateFile, 'utf8')), []);
+  assert.throws(() => execFileSync('tmux', [
+    '-L', socketName, 'display-message', '-p', '-t', paneId, '#{pane_id}',
+  ], { stdio: 'ignore' }));
+});
+
 test('retains recovery state when tmux cannot be invoked', async (t) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'dcc-query-recovery-'));
   const stateFile = path.join(directory, 'processes.json');

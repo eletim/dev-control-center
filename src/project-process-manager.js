@@ -326,8 +326,11 @@ export class ProjectProcessManager {
     const matches = result.stdout.trim().split('\n').flatMap((line) => {
       const [sessionName, sessionId, windowName, windowId, paneId, token, commandStarted] = line.split('\t');
       if (sessionName !== pending.sessionName || windowName !== pending.windowName
-        || token !== pending.token || commandStarted !== pending.token) return [];
-      return [{ sessionName, sessionId, windowName, windowId, paneId, token }];
+        || token !== pending.token) return [];
+      return [{
+        managed: { sessionName, sessionId, windowName, windowId, paneId, token },
+        started: commandStarted === pending.token,
+      }];
     });
     if (matches.length > 1) throw new Error('Multiple tmux panes claim the same project ownership token.');
     return matches[0] ?? null;
@@ -340,6 +343,11 @@ export class ProjectProcessManager {
     } catch (error) {
       if (!/can't find|no server running|no such/i.test(error.message)) throw error;
     }
+  }
+
+  #killWindowSync(managed, requireStarted = true) {
+    if (!managed?.windowId || !this.#paneState(managed, requireStarted)) return;
+    this.#tmuxQuery(['kill-window', '-t', managed.windowId], { encoding: 'utf8' });
   }
 
   #forget(id, managed) {
@@ -369,8 +377,9 @@ export class ProjectProcessManager {
         token: record.token,
       };
       if (record.pending === true) {
-        const recovered = this.#findPendingWindow(base);
-        if (recovered) this.processes.set(record.id, recovered);
+        const pendingWindow = this.#findPendingWindow(base);
+        if (pendingWindow?.started) this.processes.set(record.id, pendingWindow.managed);
+        else if (pendingWindow) this.#killWindowSync(pendingWindow.managed, false);
         continue;
       }
       if (!/^\$\d+$/.test(record.sessionId) || !/^@\d+$/.test(record.windowId)
