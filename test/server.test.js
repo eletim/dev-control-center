@@ -103,6 +103,15 @@ test('controls project lifecycle and blocks running project mutations', async ()
     assert.equal(stopped.status, 200);
     assert.equal((await stopped.json()).status, 'stopped');
     assert.equal((await fetch(`${baseUrl}/api/projects/${created.id}/stop`, { method: 'POST' })).status, 409);
+
+    await fetch(`${baseUrl}/api/projects/${created.id}`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: projectPath, startCommand: 'command-that-does-not-exist-dcc' }),
+    });
+    const failedStart = await fetch(`${baseUrl}/api/projects/${created.id}/start`, { method: 'POST' });
+    assert.equal(failedStart.status, 400);
+    assert.equal((await failedStart.json()).error, 'start_failed');
   });
 });
 

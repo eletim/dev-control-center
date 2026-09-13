@@ -1,11 +1,31 @@
 import path from 'node:path';
+import { ProjectProcessManager } from './project-process-manager.js';
 import { createAppServer } from './server.js';
 import { ProjectStore } from './project-store.js';
 
 const host = process.env.HOST || '127.0.0.1';
 const port = Number(process.env.PORT || 3000);
 const dataFile = path.resolve(process.env.DCC_DATA_FILE || '.data/projects.json');
-const server = createAppServer(new ProjectStore(dataFile));
+const processFile = path.resolve(process.env.DCC_PROCESS_FILE || `${dataFile}.processes`);
+const processManager = new ProjectProcessManager({ stateFile: processFile });
+const server = createAppServer(new ProjectStore(dataFile), processManager);
+
+let shuttingDown = false;
+async function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  server.close();
+  try {
+    await processManager.stopAll();
+    process.exitCode = 0;
+  } catch (error) {
+    console.error(error);
+    process.exitCode = 1;
+  }
+}
+
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
 
 server.listen(port, host, () => {
   const address = server.address();

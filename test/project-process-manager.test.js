@@ -100,3 +100,16 @@ test('reports stopped when the managed command exits on its own', async () => {
   await waitFor(() => !manager.isRunning(project.id));
   assert.equal(manager.isRunning(project.id), false);
 });
+
+test('rejects commands that fail immediately', async () => {
+  const projectPath = await mkdtemp(path.join(os.tmpdir(), 'dcc-failed-start-'));
+  const manager = new ProjectProcessManager({ startupDelay: 100 });
+
+  for (const [id, startCommand] of [
+    ['missing', 'command-that-does-not-exist-dcc'],
+    ['nonzero', `${shellQuote(process.execPath)} -e ${shellQuote('process.exit(23)')}`],
+  ]) {
+    await assert.rejects(manager.start({ id, path: projectPath, startCommand }), { code: 'start_failed' });
+    assert.equal(manager.isRunning(id), false);
+  }
+});
