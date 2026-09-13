@@ -2,7 +2,6 @@ import { spawn, spawnSync } from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
 
 const command = process.argv[2];
-const ownerToken = process.argv[3];
 const procDirectory = process.env.DEV_CONTROL_CENTER_PROC_DIRECTORY || '/proc';
 
 function processGroupFromPs(pid) {
@@ -26,14 +25,6 @@ process.on('SIGTERM', () => {});
 const child = spawn(command, { shell: true, stdio: 'inherit' });
 
 function finish(status) {
-  if (process.env.TMUX_PANE && ownerToken) {
-    const currentOwner = spawnSync('tmux', [
-      'display-message', '-p', '-t', process.env.TMUX_PANE, '#{@dcc_owner_token}',
-    ], { encoding: 'utf8' });
-    if (currentOwner.status === 0 && currentOwner.stdout.trim() === ownerToken) {
-      spawnSync('tmux', ['set-option', '-p', '-t', process.env.TMUX_PANE, '@dcc_exit_status', String(status)]);
-    }
-  }
   process.exit(status);
 }
 

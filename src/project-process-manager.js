@@ -40,6 +40,7 @@ export class ProjectProcessManager {
       throw new Error('The tmux session name may contain only letters, numbers, underscores, and hyphens.');
     }
     this.processes = new Map();
+    this.otherSessionRecords = [];
     this.queues = new Map();
     this.stateFile = stateFile;
     this.sessionName = sessionName;
@@ -199,7 +200,7 @@ export class ProjectProcessManager {
 
   async #createWindow(project, pending) {
     const { token, windowName } = pending;
-    const format = '#{session_id}\t#{window_id}\t#{pane_id}';
+    const format = '#{session_id}\t#{window_id}\t#{pane_id}\t#{session_created}\t#{pid}';
     let result;
     const newWindowArguments = ['new-window', '-d', '-P', '-F', format, '-t', this.sessionName, '-n', windowName, '-c', project.path];
     if (this.#sessionExists()) {
@@ -212,10 +213,12 @@ export class ProjectProcessManager {
         result = await this.#tmux(newWindowArguments);
       }
     }
-    const [sessionId, windowId, paneId] = result.stdout.trim().split('\t');
-    if (!/^\$\d+$/.test(sessionId) || !/^@\d+$/.test(windowId) || !/^%\d+$/.test(paneId)) {
+    const [sessionId, windowId, paneId, sessionCreated, serverPid] = result.stdout.trim().split('\t');
+    if (!/^\$\d+$/.test(sessionId) || !/^@\d+$/.test(windowId) || !/^%\d+$/.test(paneId)
+      || !/^\d+$/.test(sessionCreated) || !/^\d+$/.test(serverPid)) {
       throw new Error('tmux did not return a session, window, and pane identity');
     }
+    Object.assign(pending, { sessionId, windowId, paneId, sessionCreated, serverPid });
     const managed = {
       sessionName: this.sessionName,
       sessionId,
@@ -225,16 +228,17 @@ export class ProjectProcessManager {
       token,
     };
     try {
+      this.#persist();
       await this.#tmux(['set-option', '-p', '-t', paneId, '@dcc_owner_token', token]);
       await this.#tmux(['set-option', '-w', '-t', windowId, 'remain-on-exit', 'on']);
       await this.#tmux(['set-option', '-w', '-t', windowId, 'automatic-rename', 'off']);
       await this.#tmux(['set-option', '-w', '-t', windowId, 'allow-rename', 'off']);
-      const supervisor = [process.execPath, processSupervisorPath, project.startCommand, token].map(shellQuote).join(' ');
+      const supervisor = [process.execPath, processSupervisorPath, project.startCommand].map(shellQuote).join(' ');
       const command = `${shellQuote(this.tmuxPath)} set-option -p -t "$TMUX_PANE" @dcc_command_started ${shellQuote(token)} && exec ${supervisor}`;
       await this.#tmux(['respawn-pane', '-k', '-t', paneId, '-c', project.path, command]);
       return managed;
     } catch (error) {
-      await this.#killWindow(managed, false);
+      await this.#killPendingWindow(pending);
       throw error;
     }
   }
@@ -300,7 +304,7 @@ export class ProjectProcessManager {
   #paneState(managed, requireStarted = true) {
     const result = this.#tmuxQuery([
       'display-message', '-p', '-t', managed.paneId,
-      '#{session_name}\t#{session_id}\t#{window_name}\t#{window_id}\t#{pane_id}\t#{@dcc_owner_token}\t#{@dcc_command_started}\t#{pane_dead}\t#{@dcc_exit_status}\t#{pane_dead_signal}\t#{pane_pid}',
+      '#{session_name}\t#{session_id}\t#{window_name}\t#{window_id}\t#{pane_id}\t#{@dcc_owner_token}\t#{@dcc_command_started}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_dead_signal}\t#{pane_pid}',
     ], { encoding: 'utf8' });
     if (!result) return null;
     const [sessionName, sessionId, windowName, windowId, paneId, token, commandStarted, dead, status, signal, pid]
@@ -318,6 +322,26 @@ export class ProjectProcessManager {
   }
 
   #findPendingWindow(pending) {
+    if (/^\$\d+$/.test(pending.sessionId) && /^@\d+$/.test(pending.windowId)
+      && /^%\d+$/.test(pending.paneId) && /^\d+$/.test(pending.sessionCreated)
+      && /^\d+$/.test(pending.serverPid)) {
+      const result = this.#tmuxQuery([
+        'display-message', '-p', '-t', pending.paneId,
+        '#{session_name}\t#{session_id}\t#{session_created}\t#{pid}\t#{window_name}\t#{window_id}\t#{pane_id}\t#{@dcc_owner_token}\t#{@dcc_command_started}',
+      ], { encoding: 'utf8' });
+      if (!result) return null;
+      const [sessionName, sessionId, sessionCreated, serverPid, windowName, windowId, paneId, token, commandStarted]
+        = result.stdout.trim().split('\t');
+      if (sessionName !== pending.sessionName || sessionId !== pending.sessionId
+        || sessionCreated !== pending.sessionCreated || serverPid !== pending.serverPid
+        || windowId !== pending.windowId
+        || paneId !== pending.paneId || (token && token !== pending.token)) return null;
+      return {
+        managed: { sessionName, sessionId, windowName, windowId, paneId, token: pending.token },
+        started: token === pending.token && commandStarted === pending.token,
+      };
+    }
+
     const result = this.#tmuxQuery([
       'list-panes', '-a', '-F',
       '#{session_name}\t#{session_id}\t#{window_name}\t#{window_id}\t#{pane_id}\t#{@dcc_owner_token}\t#{@dcc_command_started}',
@@ -345,9 +369,23 @@ export class ProjectProcessManager {
     }
   }
 
-  #killWindowSync(managed, requireStarted = true) {
-    if (!managed?.windowId || !this.#paneState(managed, requireStarted)) return;
-    this.#tmuxQuery(['kill-window', '-t', managed.windowId], { encoding: 'utf8' });
+  async #killPendingWindow(pending) {
+    const pendingWindow = this.#findPendingWindow(pending);
+    if (!pendingWindow) return;
+    try {
+      await this.#tmux(['kill-window', '-t', pendingWindow.managed.windowId]);
+    } catch (error) {
+      if (!/can't find|no server running|no such/i.test(error.message)) throw error;
+    }
+  }
+
+  #killPendingWindowSync(pending) {
+    const pendingWindow = this.#findPendingWindow(pending);
+    if (!pendingWindow) return null;
+    if (!pendingWindow.started) {
+      this.#tmuxQuery(['kill-window', '-t', pendingWindow.managed.windowId], { encoding: 'utf8' });
+    }
+    return pendingWindow;
   }
 
   #forget(id, managed) {
@@ -368,6 +406,11 @@ export class ProjectProcessManager {
     }
 
     for (const record of records) {
+      if (typeof record.id === 'string' && typeof record.sessionName === 'string'
+        && record.sessionName !== this.sessionName) {
+        this.otherSessionRecords.push(record);
+        continue;
+      }
       if (typeof record.id !== 'string' || record.sessionName !== this.sessionName
         || typeof record.windowName !== 'string' || typeof record.token !== 'string'
         || record.token.length < 32) continue;
@@ -377,9 +420,15 @@ export class ProjectProcessManager {
         token: record.token,
       };
       if (record.pending === true) {
-        const pendingWindow = this.#findPendingWindow(base);
+        const pendingWindow = this.#killPendingWindowSync({
+          ...base,
+          sessionId: record.sessionId,
+          windowId: record.windowId,
+          paneId: record.paneId,
+          sessionCreated: record.sessionCreated,
+          serverPid: record.serverPid,
+        });
         if (pendingWindow?.started) this.processes.set(record.id, pendingWindow.managed);
-        else if (pendingWindow) this.#killWindowSync(pendingWindow.managed, false);
         continue;
       }
       if (!/^\$\d+$/.test(record.sessionId) || !/^@\d+$/.test(record.windowId)
@@ -397,7 +446,10 @@ export class ProjectProcessManager {
 
   #persist() {
     if (!this.stateFile) return;
-    const records = [...this.processes.entries()].map(([id, managed]) => ({ id, ...managed }));
+    const records = [
+      ...this.otherSessionRecords,
+      ...[...this.processes.entries()].map(([id, managed]) => ({ id, ...managed })),
+    ];
     mkdirSync(path.dirname(this.stateFile), { recursive: true });
     const temporaryPath = `${this.stateFile}.${process.pid}.tmp`;
     writeFileSync(temporaryPath, `${JSON.stringify(records, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -183,6 +183,91 @@ test('removes a token-owned pending window when its command was not launched', a
   assert.throws(() => execFileSync('tmux', [
     '-L', socketName, 'display-message', '-p', '-t', paneId, '#{pane_id}',
   ], { stdio: 'ignore' }));
+});
+
+test('removes an unowned window recorded immediately after tmux creates it', async (t) => {
+  const resources = [];
+  t.after(async () => {
+    for (const { manager, socketName } of resources) {
+      await manager?.stopAll();
+      manager?.releaseStateLock();
+      try {
+        execFileSync('tmux', ['-L', socketName, 'kill-server'], { stdio: 'ignore' });
+      } catch {
+        // The isolated server may already be gone.
+      }
+    }
+  });
+
+  for (const creation of ['new-session', 'new-window']) {
+    const directory = await mkdtemp(path.join(os.tmpdir(), `dcc-unowned-${creation}-`));
+    const stateFile = path.join(directory, 'processes.json');
+    const interruptMarker = path.join(directory, 'interrupt-on-owner');
+    const tmuxWrapper = path.join(directory, 'interrupting-tmux');
+    const tmuxExecutable = execFileSync('sh', ['-c', 'command -v tmux'], { encoding: 'utf8' }).trim();
+    const socketName = `dcc-unowned-${creation}-${process.pid}`;
+    const sessionName = `dcc-unowned-${creation}-session-${process.pid}`;
+    const project = {
+      id: `unowned-${creation}`,
+      path: directory,
+      startCommand: 'sleep 20',
+    };
+    if (creation === 'new-window') {
+      execFileSync('tmux', ['-L', socketName, 'new-session', '-d', '-s', sessionName, '-n', 'keeper']);
+    }
+    await writeFile(interruptMarker, '');
+    await writeFile(tmuxWrapper, [
+      '#!/bin/sh',
+      `if [ -f ${shellQuote(interruptMarker)} ]; then`,
+      '  case " $* " in',
+      `    *" @dcc_owner_token "*) /bin/rm ${shellQuote(interruptMarker)}; kill -KILL "$PPID"; exit 137 ;;`,
+      '  esac',
+      'fi',
+      `exec ${shellQuote(tmuxExecutable)} "$@"`,
+      '',
+    ].join('\n'));
+    await chmod(tmuxWrapper, 0o755);
+    const childScript = [
+      `import { ProjectProcessManager } from ${JSON.stringify(new URL('../src/project-process-manager.js', import.meta.url).href)}`,
+      `const manager = new ProjectProcessManager(${JSON.stringify({
+        stateFile, sessionName, tmuxPath: tmuxWrapper, tmuxSocketName: socketName,
+      })})`,
+      `await manager.start(${JSON.stringify(project)})`,
+    ].join(';');
+    const interrupted = spawn(process.execPath, ['--input-type=module', '-e', childScript], { stdio: 'ignore' });
+    const [exitCode, signal] = await once(interrupted, 'exit', { signal: AbortSignal.timeout(2000) });
+    assert.equal(exitCode, null);
+    assert.equal(signal, 'SIGKILL');
+    const [pending] = JSON.parse(await readFile(stateFile, 'utf8'));
+    assert.equal(pending.pending, true);
+    assert.match(pending.sessionId, /^\$\d+$/);
+    assert.match(pending.windowId, /^@\d+$/);
+    assert.match(pending.paneId, /^%\d+$/);
+    assert.match(pending.sessionCreated, /^\d+$/);
+    assert.match(pending.serverPid, /^\d+$/);
+
+    const resource = { socketName, manager: null };
+    resources.push(resource);
+    resource.manager = new ProjectProcessManager({
+      stateFile, sessionName, tmuxPath: tmuxWrapper, tmuxSocketName: socketName,
+    });
+    assert.equal(resource.manager.processes.has(project.id), false);
+    let remainingPaneIds = [];
+    try {
+      remainingPaneIds = execFileSync('tmux', [
+        '-L', socketName, 'list-panes', '-a', '-F', '#{pane_id}',
+      ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim().split('\n');
+    } catch {
+      // Killing the only window also removes its isolated tmux server.
+    }
+    assert.equal(remainingPaneIds.includes(pending.paneId), false, `${creation} window should be removed during recovery`);
+
+    await resource.manager.start(project);
+    const projectWindows = execFileSync('tmux', [
+      '-L', socketName, 'list-windows', '-t', `=${sessionName}`, '-F', '#{window_name}',
+    ], { encoding: 'utf8' }).trim().split('\n').filter((name) => name === projectWindowName(project));
+    assert.equal(projectWindows.length, 1);
+  }
 });
 
 test('retains recovery state when tmux cannot be invoked', async (t) => {
@@ -439,6 +524,35 @@ test('rejects commands that fail immediately and retains their windows', async (
     assert.equal(manager.isRunning(id), false);
     assert.ok(manager.processes.get(id));
   }
+});
+
+test('uses tmux pane status for immediate exits with a custom executable', async (t) => {
+  const projectPath = await mkdtemp(path.join(os.tmpdir(), 'dcc-custom-tmux-'));
+  const tmuxWrapper = path.join(projectPath, 'custom-tmux');
+  const tmuxExecutable = execFileSync('sh', ['-c', 'command -v tmux'], { encoding: 'utf8' }).trim();
+  await writeFile(tmuxWrapper, `#!/bin/sh\nPATH=/no-tmux-on-path\nexport PATH\nexec ${shellQuote(tmuxExecutable)} "$@"\n`);
+  await chmod(tmuxWrapper, 0o755);
+  const manager = createManager({ tmuxPath: tmuxWrapper, startupDelay: 100 });
+  t.after(() => manager.stopAll());
+
+  const clean = {
+    id: 'custom-clean',
+    path: projectPath,
+    startCommand: `${shellQuote(process.execPath)} -e ${shellQuote('process.exit(0)')}`,
+  };
+  await manager.start(clean);
+  assert.equal(manager.isRunning(clean.id), false);
+
+  const nonzero = {
+    id: 'custom-nonzero',
+    path: projectPath,
+    startCommand: `${shellQuote(process.execPath)} -e ${shellQuote('process.exit(23)')}`,
+  };
+  await assert.rejects(manager.start(nonzero), (error) => {
+    assert.equal(error.code, 'start_failed');
+    assert.match(error.message, /exit code 23/);
+    return true;
+  });
 });
 
 test('shutdown seals lifecycle work, drains a queued start, and stops it', async (t) => {

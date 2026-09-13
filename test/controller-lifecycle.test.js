@@ -61,6 +61,7 @@ test('reconciles tmux windows after controller restart and cleans them up on gra
   const dataFile = path.join(directory, 'projects.json');
   const processFile = path.join(directory, 'processes.json');
   const sessionName = `dcc-controller-test-${process.pid}`;
+  const alternateSessionName = `dcc-controller-alternate-${process.pid}`;
   await mkdir(projectPath);
   const command = `exec env -i ${JSON.stringify(process.execPath)} -e ${JSON.stringify('setInterval(() => {}, 1000)')}`;
   const project = { id: 'managed-project', path: projectPath, startCommand: command };
@@ -72,8 +73,10 @@ test('reconciles tmux windows after controller restart and cleans them up on gra
     for (const controller of controllers) {
       if (controller.exitCode === null) controller.kill('SIGKILL');
     }
-    const cleanup = spawn('tmux', ['kill-session', '-t', `=${sessionName}`]);
-    await once(cleanup, 'exit');
+    for (const cleanupSession of [sessionName, alternateSessionName]) {
+      const cleanup = spawn('tmux', ['kill-session', '-t', `=${cleanupSession}`]);
+      await once(cleanup, 'exit');
+    }
   });
 
   const first = await startController(dataFile, processFile, sessionName);
@@ -92,6 +95,16 @@ test('reconciles tmux windows after controller restart and cleans them up on gra
   first.child.kill('SIGKILL');
   await once(first.child, 'exit');
   assert.equal(await paneExists(lastPane), true);
+
+  const alternate = await startController(dataFile, processFile, alternateSessionName);
+  controllers.push(alternate.child);
+  const withEnvironmentOverride = await fetch(`${alternate.baseUrl}/api/projects/${project.id}`)
+    .then((response) => response.json());
+  assert.equal(withEnvironmentOverride.status, 'stopped');
+  assert.equal(JSON.parse(await readFile(processFile, 'utf8'))[0].sessionName, sessionName);
+  assert.equal(await paneExists(lastPane), true);
+  alternate.child.kill('SIGKILL');
+  await once(alternate.child, 'exit');
 
   const second = await startController(dataFile, processFile, sessionName);
   controllers.push(second.child);
