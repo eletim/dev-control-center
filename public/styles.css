@@ -10,6 +10,7 @@ label { display: grid; gap: .4rem; font-weight: 600; }
 input { box-sizing: border-box; width: 100%; background: #0f1218; color: inherit; border: 1px solid #3b455a; border-radius: 6px; padding: .7rem; }
 button { border: 0; border-radius: 6px; padding: .7rem 1rem; background: #6c88ff; color: #080b12; font-weight: 700; cursor: pointer; }
 button.secondary { background: #2a3242; color: #edf0f7; }
+button:disabled { cursor: not-allowed; opacity: .45; }
 .actions { display: flex; gap: .5rem; align-items: end; }
 #message { min-height: 1.25rem; margin: 1rem 0 0; color: #ffacac; }
 .section-heading { display: flex; justify-content: space-between; align-items: center; margin: 2rem 0 1rem; }
@@ -18,6 +19,9 @@ button.secondary { background: #2a3242; color: #edf0f7; }
 .project h3 { margin: 0 0 .4rem; }
 .project code { word-break: break-all; color: #bdc9f5; }
 .meta { color: #aeb7c7; }
+.status { display: inline-block; margin-bottom: .75rem; border-radius: 999px; padding: .2rem .55rem; font-size: .8rem; font-weight: 700; }
+.status.running { background: #174a38; color: #9ef0cb; }
+.status.stopped { background: #343b49; color: #c7cedb; }
 .project .actions { margin-top: 1rem; }
 .empty { color: #aeb7c7; }
 @media (max-width: 650px) { form { grid-template-columns: 1fr; } }
