@@ -11,7 +11,9 @@ npm start
 ```
 
 Open <http://localhost:3000>. Set `HOST`, `PORT`, or `DCC_DATA_FILE` to change
-the listening address, port, or persistent data file.
+the listening address, port, or persistent project data file. Process ownership
+is stored beside the project data by default; set `DCC_PROCESS_FILE` to change
+that location.
 
 ## Test
 

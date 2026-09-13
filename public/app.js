@@ -36,20 +36,51 @@ function render() {
     const git = document.createElement('p');
     git.className = 'meta';
     git.textContent = gitSummary(project.git);
+    const status = document.createElement('p');
+    status.className = `status ${project.status}`;
+    status.textContent = project.status === 'running' ? 'Running' : 'Stopped';
     const actions = document.createElement('div');
     actions.className = 'actions';
+    const start = document.createElement('button');
+    start.textContent = 'Start';
+    start.disabled = project.status === 'running';
+    start.addEventListener('click', () => runAction(project, 'start'));
+    const stop = document.createElement('button');
+    stop.className = 'secondary';
+    stop.textContent = 'Stop';
+    stop.disabled = project.status !== 'running';
+    stop.addEventListener('click', () => runAction(project, 'stop'));
+    const restart = document.createElement('button');
+    restart.className = 'secondary';
+    restart.textContent = 'Restart';
+    restart.disabled = project.status !== 'running';
+    restart.addEventListener('click', () => runAction(project, 'restart'));
     const edit = document.createElement('button');
     edit.className = 'secondary';
     edit.textContent = 'Edit';
+    edit.disabled = project.status === 'running';
     edit.addEventListener('click', () => editProject(project));
     const remove = document.createElement('button');
     remove.className = 'secondary';
     remove.textContent = 'Delete';
+    remove.disabled = project.status === 'running';
     remove.addEventListener('click', () => deleteProject(project));
-    actions.append(edit, remove);
-    article.append(heading, pathLine, command, git, actions);
+    actions.append(start, stop, restart, edit, remove);
+    article.append(heading, status, pathLine, command, git, actions);
     return article;
   }));
+}
+
+async function runAction(project, action) {
+  message.textContent = '';
+  const response = await fetch(`/api/projects/${encodeURIComponent(project.id)}/${action}`, { method: 'POST' });
+  let errorMessage = '';
+  if (!response.ok) {
+    const body = await response.json();
+    errorMessage = body.message;
+  }
+  await loadProjects();
+  message.textContent = errorMessage;
 }
 
 async function loadProjects() {

@@ -3,6 +3,7 @@ import { createServer } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getGitMetadata } from './git-metadata.js';
+import { ProjectProcessManager } from './project-process-manager.js';
 import { ProjectError } from './project-store.js';
 
 const publicDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../public');
@@ -32,46 +33,68 @@ async function readJson(request) {
   }
 }
 
-async function present(project) {
+async function present(project, processManager) {
   return {
     ...project,
     name: path.basename(project.path),
+    status: processManager.isRunning(project.id) ? 'running' : 'stopped',
     git: await getGitMetadata(project.path),
   };
 }
 
-export function createAppServer(store) {
+export function createAppServer(store, processManager = new ProjectProcessManager()) {
   return createServer(async (request, response) => {
     try {
       const url = new URL(request.url, 'http://localhost');
       const match = url.pathname.match(/^\/api\/projects\/([^/]+)$/);
+      const actionMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/(start|stop|restart)$/);
 
       if (request.method === 'GET' && url.pathname === '/api/projects') {
         const projects = await store.list();
-        sendJson(response, 200, await Promise.all(projects.map(present)));
+        sendJson(response, 200, await Promise.all(projects.map((project) => present(project, processManager))));
         return;
       }
 
       if (request.method === 'POST' && url.pathname === '/api/projects') {
-        sendJson(response, 201, await present(await store.create(await readJson(request))));
+        sendJson(response, 201, await present(await store.create(await readJson(request)), processManager));
+        return;
+      }
+
+      if (actionMatch && request.method === 'POST') {
+        const id = decodeURIComponent(actionMatch[1]);
+        const project = await processManager.perform(id, actionMatch[2], () => store.get(id));
+        sendJson(response, 200, await present(project, processManager));
         return;
       }
 
       if (match && request.method === 'GET') {
         const project = await store.get(decodeURIComponent(match[1]));
         if (!project) throw new ProjectError('not_found', 'Project not found.');
-        sendJson(response, 200, await present(project));
+        sendJson(response, 200, await present(project, processManager));
         return;
       }
 
       if (match && request.method === 'PUT') {
-        const project = await store.update(decodeURIComponent(match[1]), await readJson(request));
-        sendJson(response, 200, await present(project));
+        const id = decodeURIComponent(match[1]);
+        const input = await readJson(request);
+        const project = await processManager.withProjectLock(id, async () => {
+          if (processManager.isRunning(id)) {
+            throw new ProjectError('project_running', 'Stop the project before changing its Path or Start Command.');
+          }
+          return store.update(id, input);
+        });
+        sendJson(response, 200, await present(project, processManager));
         return;
       }
 
       if (match && request.method === 'DELETE') {
-        await store.delete(decodeURIComponent(match[1]));
+        const id = decodeURIComponent(match[1]);
+        await processManager.withProjectLock(id, async () => {
+          if (processManager.isRunning(id)) {
+            throw new ProjectError('project_running', 'Stop the project before deleting it.');
+          }
+          await store.delete(id);
+        });
         response.writeHead(204);
         response.end();
         return;
@@ -88,7 +111,11 @@ export function createAppServer(store) {
       sendJson(response, 404, { error: 'not_found', message: 'Not found.' });
     } catch (error) {
       if (error instanceof ProjectError) {
-        sendJson(response, error.code === 'not_found' ? 404 : error.code === 'duplicate_path' ? 409 : 400, {
+        const conflicts = ['duplicate_path', 'already_running', 'not_running', 'project_running'];
+        const status = error.code === 'not_found' ? 404
+          : error.code === 'shutting_down' ? 503
+            : conflicts.includes(error.code) ? 409 : 400;
+        sendJson(response, status, {
           error: error.code,
           message: error.message,
         });
