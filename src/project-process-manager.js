@@ -74,6 +74,7 @@ export class ProjectProcessManager {
   isRunning(id) {
     const managed = this.processes.get(id);
     if (!managed) return false;
+    if (managed.pending) return false;
     const pane = this.#paneState(managed);
     if (!pane) {
       this.#forget(id, managed);
@@ -170,13 +171,21 @@ export class ProjectProcessManager {
       this.#forget(project.id, managed);
     }
 
+    const pending = {
+      pending: true,
+      sessionName: this.sessionName,
+      windowName: projectWindowName(project),
+      token: randomUUID(),
+    };
+    this.processes.set(project.id, pending);
+    this.#persist();
+
     try {
-      managed = await this.#createWindow(project);
+      managed = await this.#createWindow(project, pending);
       this.processes.set(project.id, managed);
       this.#persist();
     } catch (error) {
-      if (managed) await this.#killWindow(managed);
-      this.#forget(project.id, managed);
+      this.#forget(project.id, pending);
       throw new ProjectError('start_failed', `Could not start project in tmux: ${error.message}`);
     }
 
@@ -188,9 +197,8 @@ export class ProjectProcessManager {
     }
   }
 
-  async #createWindow(project) {
-    const windowName = projectWindowName(project);
-    const token = randomUUID();
+  async #createWindow(project, pending) {
+    const { token, windowName } = pending;
     const format = '#{session_id}\t#{window_id}\t#{pane_id}';
     let result;
     const newWindowArguments = ['new-window', '-d', '-P', '-F', format, '-t', this.sessionName, '-n', windowName, '-c', project.path];
@@ -221,11 +229,12 @@ export class ProjectProcessManager {
       await this.#tmux(['set-option', '-w', '-t', windowId, 'remain-on-exit', 'on']);
       await this.#tmux(['set-option', '-w', '-t', windowId, 'automatic-rename', 'off']);
       await this.#tmux(['set-option', '-w', '-t', windowId, 'allow-rename', 'off']);
-      const command = `exec ${[process.execPath, processSupervisorPath, project.startCommand, token].map(shellQuote).join(' ')}`;
+      const supervisor = [process.execPath, processSupervisorPath, project.startCommand, token].map(shellQuote).join(' ');
+      const command = `${shellQuote(this.tmuxPath)} set-option -p -t "$TMUX_PANE" @dcc_command_started ${shellQuote(token)} && exec ${supervisor}`;
       await this.#tmux(['respawn-pane', '-k', '-t', paneId, '-c', project.path, command]);
       return managed;
     } catch (error) {
-      await this.#killWindow(managed);
+      await this.#killWindow(managed, false);
       throw error;
     }
   }
@@ -233,6 +242,11 @@ export class ProjectProcessManager {
   async #stop(id, requireRunning) {
     const managed = this.processes.get(id);
     if (!managed) {
+      if (requireRunning) throw new ProjectError('not_running', 'Project is not running.');
+      return;
+    }
+    if (managed.pending) {
+      this.#forget(id, managed);
       if (requireRunning) throw new ProjectError('not_running', 'Project is not running.');
       return;
     }
@@ -283,17 +297,18 @@ export class ProjectProcessManager {
     return this.#tmuxSync(['has-session', '-t', `=${this.sessionName}`], { stdio: 'ignore' }).status === 0;
   }
 
-  #paneState(managed) {
-    const result = this.#tmuxSync([
+  #paneState(managed, requireStarted = true) {
+    const result = this.#tmuxQuery([
       'display-message', '-p', '-t', managed.paneId,
-      '#{session_name}\t#{session_id}\t#{window_name}\t#{window_id}\t#{pane_id}\t#{@dcc_owner_token}\t#{pane_dead}\t#{@dcc_exit_status}\t#{pane_dead_signal}\t#{pane_pid}',
+      '#{session_name}\t#{session_id}\t#{window_name}\t#{window_id}\t#{pane_id}\t#{@dcc_owner_token}\t#{@dcc_command_started}\t#{pane_dead}\t#{@dcc_exit_status}\t#{pane_dead_signal}\t#{pane_pid}',
     ], { encoding: 'utf8' });
-    if (result.status !== 0) return null;
-    const [sessionName, sessionId, windowName, windowId, paneId, token, dead, status, signal, pid]
+    if (!result) return null;
+    const [sessionName, sessionId, windowName, windowId, paneId, token, commandStarted, dead, status, signal, pid]
       = result.stdout.trim().split('\t');
     if (sessionName !== managed.sessionName || sessionId !== managed.sessionId
       || windowName !== managed.windowName || windowId !== managed.windowId
-      || paneId !== managed.paneId || token !== managed.token) return null;
+      || paneId !== managed.paneId || token !== managed.token
+      || (requireStarted && commandStarted !== managed.token)) return null;
     return {
       dead: dead === '1',
       status: status === '' ? null : Number(status),
@@ -302,8 +317,24 @@ export class ProjectProcessManager {
     };
   }
 
-  async #killWindow(managed) {
-    if (!managed?.windowId || !this.#paneState(managed)) return;
+  #findPendingWindow(pending) {
+    const result = this.#tmuxQuery([
+      'list-panes', '-a', '-F',
+      '#{session_name}\t#{session_id}\t#{window_name}\t#{window_id}\t#{pane_id}\t#{@dcc_owner_token}\t#{@dcc_command_started}',
+    ], { encoding: 'utf8' });
+    if (!result) return null;
+    const matches = result.stdout.trim().split('\n').flatMap((line) => {
+      const [sessionName, sessionId, windowName, windowId, paneId, token, commandStarted] = line.split('\t');
+      if (sessionName !== pending.sessionName || windowName !== pending.windowName
+        || token !== pending.token || commandStarted !== pending.token) return [];
+      return [{ sessionName, sessionId, windowName, windowId, paneId, token }];
+    });
+    if (matches.length > 1) throw new Error('Multiple tmux panes claim the same project ownership token.');
+    return matches[0] ?? null;
+  }
+
+  async #killWindow(managed, requireStarted = true) {
+    if (!managed?.windowId || !this.#paneState(managed, requireStarted)) return;
     try {
       await this.#tmux(['kill-window', '-t', managed.windowId]);
     } catch (error) {
@@ -330,16 +361,25 @@ export class ProjectProcessManager {
 
     for (const record of records) {
       if (typeof record.id !== 'string' || record.sessionName !== this.sessionName
-        || !/^\$\d+$/.test(record.sessionId) || typeof record.windowName !== 'string'
-        || !/^@\d+$/.test(record.windowId) || !/^%\d+$/.test(record.paneId)
-        || typeof record.token !== 'string' || record.token.length < 32) continue;
-      const managed = {
+        || typeof record.windowName !== 'string' || typeof record.token !== 'string'
+        || record.token.length < 32) continue;
+      const base = {
         sessionName: record.sessionName,
-        sessionId: record.sessionId,
         windowName: record.windowName,
+        token: record.token,
+      };
+      if (record.pending === true) {
+        const recovered = this.#findPendingWindow(base);
+        if (recovered) this.processes.set(record.id, recovered);
+        continue;
+      }
+      if (!/^\$\d+$/.test(record.sessionId) || !/^@\d+$/.test(record.windowId)
+        || !/^%\d+$/.test(record.paneId)) continue;
+      const managed = {
+        ...base,
+        sessionId: record.sessionId,
         windowId: record.windowId,
         paneId: record.paneId,
-        token: record.token,
       };
       if (this.#paneState(managed)) this.processes.set(record.id, managed);
     }
@@ -367,6 +407,18 @@ export class ProjectProcessManager {
 
   #tmuxSync(args, options) {
     return spawnSync(this.tmuxPath, this.#tmuxArguments(args), options);
+  }
+
+  #tmuxQuery(args, options) {
+    const result = this.#tmuxSync(args, options);
+    if (result.error) {
+      const detail = result.error.code === 'ENOENT' ? `${this.tmuxPath} is not installed` : result.error.message;
+      throw new Error(`Could not query tmux: ${detail}`, { cause: result.error });
+    }
+    if (result.status === 0) return result;
+    const detail = (result.stderr || '').trim();
+    if (/can't find|no server running|no such file or directory/i.test(detail)) return null;
+    throw new Error(`Could not query tmux: ${detail || `exit code ${result.status}`}`);
   }
 
   #tmuxArguments(args) {

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdir, mkdtemp, readFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -102,6 +102,102 @@ test('discards stale state when a restarted tmux server reuses window and pane I
   assert.equal(recoveredManager.isRunning(project.id), false);
   await recoveredManager.stopAll();
   assert.doesNotThrow(() => process.kill(unrelatedPid, 0));
+});
+
+test('recovers a command launched after only pending ownership was persisted', async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'dcc-pending-start-'));
+  const stateFile = path.join(directory, 'processes.json');
+  const socketName = `dcc-pending-test-${process.pid}`;
+  const sessionName = `dcc-pending-session-${process.pid}`;
+  const project = { id: 'pending-project', path: directory };
+  const pending = {
+    id: project.id,
+    pending: true,
+    sessionName,
+    windowName: projectWindowName(project),
+    token: 'c8f0b563-83a2-45c3-b9ae-6cc0ed6f79cb',
+  };
+  await writeFile(stateFile, `${JSON.stringify([pending], null, 2)}\n`);
+  const [sessionId, windowId, paneId] = execFileSync('tmux', [
+    '-L', socketName, 'new-session', '-d', '-P', '-F', '#{session_id}\t#{window_id}\t#{pane_id}',
+    '-s', sessionName, '-n', pending.windowName,
+  ], { encoding: 'utf8' }).trim().split('\t');
+  execFileSync('tmux', ['-L', socketName, 'set-option', '-p', '-t', paneId, '@dcc_owner_token', pending.token]);
+  execFileSync('tmux', ['-L', socketName, 'set-option', '-p', '-t', paneId, '@dcc_command_started', pending.token]);
+  execFileSync('tmux', ['-L', socketName, 'respawn-pane', '-k', '-t', paneId, 'exec sleep 20']);
+
+  const manager = new ProjectProcessManager({ stateFile, sessionName, tmuxSocketName: socketName });
+  t.after(async () => {
+    await manager.stopAll();
+    manager.releaseStateLock();
+    try {
+      execFileSync('tmux', ['-L', socketName, 'kill-server'], { stdio: 'ignore' });
+    } catch {
+      // stopAll normally removes the isolated server's last window.
+    }
+  });
+
+  assert.equal(manager.isRunning(project.id), true);
+  assert.deepEqual(manager.processes.get(project.id), {
+    sessionName,
+    sessionId,
+    windowName: pending.windowName,
+    windowId,
+    paneId,
+    token: pending.token,
+  });
+  assert.equal(JSON.parse(await readFile(stateFile, 'utf8'))[0].pending, undefined);
+});
+
+test('retains recovery state when tmux cannot be invoked', async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'dcc-query-recovery-'));
+  const stateFile = path.join(directory, 'processes.json');
+  const sessionName = `dcc-query-recovery-${process.pid}`;
+  const project = { id: 'query-recovery', path: directory, startCommand: 'sleep 20' };
+  const firstManager = new ProjectProcessManager({ stateFile, sessionName });
+  let recoveredManager;
+  t.after(async () => {
+    if (recoveredManager) await recoveredManager.stopAll();
+    else {
+      try {
+        execFileSync('tmux', ['kill-session', '-t', `=${sessionName}`], { stdio: 'ignore' });
+      } catch {
+        // The session may already be gone.
+      }
+    }
+    recoveredManager?.releaseStateLock();
+  });
+
+  await firstManager.start(project);
+  firstManager.releaseStateLock();
+  const persisted = await readFile(stateFile, 'utf8');
+  assert.throws(() => new ProjectProcessManager({
+    stateFile,
+    sessionName,
+    tmuxPath: '/tmux-that-does-not-exist',
+  }), /Could not query tmux.*not installed/);
+  assert.equal(await readFile(stateFile, 'utf8'), persisted);
+
+  recoveredManager = new ProjectProcessManager({ stateFile, sessionName });
+  assert.equal(recoveredManager.isRunning(project.id), true);
+});
+
+test('retains ordinary status state when a tmux query fails', async (t) => {
+  const projectPath = await mkdtemp(path.join(os.tmpdir(), 'dcc-query-status-'));
+  const project = { id: 'query-status', path: projectPath, startCommand: 'sleep 20' };
+  const manager = createManager();
+  t.after(async () => {
+    manager.tmuxPath = 'tmux';
+    await manager.stopAll();
+  });
+
+  await manager.start(project);
+  const managed = manager.processes.get(project.id);
+  manager.tmuxPath = '/tmux-that-does-not-exist';
+  assert.throws(() => manager.isRunning(project.id), /Could not query tmux.*not installed/);
+  assert.equal(manager.processes.get(project.id), managed);
+  manager.tmuxPath = 'tmux';
+  assert.equal(manager.isRunning(project.id), true);
 });
 
 test('supervisor falls back to ps when procfs is unavailable', async (t) => {
