@@ -7,11 +7,11 @@ h1, h2, p { margin-top: 0; }
 .panel, .project { background: #191e29; border: 1px solid #2a3242; border-radius: 12px; padding: 1.25rem; }
 form { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
 label { display: grid; gap: .4rem; font-weight: 600; }
-input { box-sizing: border-box; width: 100%; background: #0f1218; color: inherit; border: 1px solid #3b455a; border-radius: 6px; padding: .7rem; }
+input, select { box-sizing: border-box; width: 100%; background: #0f1218; color: inherit; border: 1px solid #3b455a; border-radius: 6px; padding: .7rem; }
 button { border: 0; border-radius: 6px; padding: .7rem 1rem; background: #6c88ff; color: #080b12; font-weight: 700; cursor: pointer; }
 button.secondary { background: #2a3242; color: #edf0f7; }
 button:disabled { cursor: not-allowed; opacity: .45; }
-.actions { display: flex; gap: .5rem; align-items: end; }
+.actions { display: flex; flex-wrap: wrap; gap: .5rem; align-items: end; }
 #message { min-height: 1.25rem; margin: 1rem 0 0; color: #ffacac; }
 .section-heading { display: flex; justify-content: space-between; align-items: center; margin: 2rem 0 1rem; }
 .section-heading h2 { margin: 0; }
@@ -24,4 +24,19 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .status.stopped { background: #343b49; color: #c7cedb; }
 .project .actions { margin-top: 1rem; }
 .empty { color: #aeb7c7; }
-@media (max-width: 650px) { form { grid-template-columns: 1fr; } }
+.git-state { margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid #2a3242; }
+.git-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.git-heading h4 { margin: 0; }
+button.compact { padding: .45rem .7rem; }
+.git-metadata { display: grid; grid-template-columns: max-content 1fr; gap: .35rem 1rem; margin: .8rem 0; font-size: .9rem; }
+.git-metadata dt { color: #aeb7c7; }
+.git-metadata dd { margin: 0; overflow-wrap: anywhere; }
+.branch-controls { display: grid; grid-template-columns: minmax(12rem, 1fr) auto; gap: .5rem; align-items: end; }
+.inline-message, .project-message { margin: .7rem 0 0; }
+.error { color: #ffacac; }
+.success { color: #9ef0cb; }
+.unavailable { color: #d1bb83; }
+@media (max-width: 650px) {
+  form, .branch-controls { grid-template-columns: 1fr; }
+  .branch-controls button { justify-self: start; }
+}
