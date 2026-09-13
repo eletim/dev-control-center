@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Dev Control Center</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main>
+      <header>
+        <p class="eyebrow">Local workspace</p>
+        <h1>Dev Control Center</h1>
+        <p>Keep project paths and start commands in one place.</p>
+      </header>
+
+      <section class="panel">
+        <h2 id="form-title">Add project</h2>
+        <form id="project-form">
+          <input id="project-id" type="hidden">
+          <label>Path <input id="path" name="path" required placeholder="/home/me/code/project"></label>
+          <label>Start Command <input id="start-command" name="startCommand" required placeholder="npm run dev"></label>
+          <div class="actions">
+            <button type="submit">Save project</button>
+            <button id="cancel" type="button" class="secondary" hidden>Cancel</button>
+          </div>
+        </form>
+        <p id="message" role="status"></p>
+      </section>
+
+      <section>
+        <div class="section-heading"><h2>Projects</h2><button id="refresh" class="secondary">Refresh</button></div>
+        <div id="projects" class="projects"></div>
+      </section>
+    </main>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
