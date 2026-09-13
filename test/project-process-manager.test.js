@@ -1,13 +1,16 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { mkdir, mkdtemp, readFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { projectWindowName, ProjectProcessManager } from '../src/project-process-manager.js';
 
 const pause = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 const shellQuote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
+const processSupervisorPath = fileURLToPath(new URL('../src/process-supervisor.js', import.meta.url));
 let managerNumber = 0;
 const createManager = (options = {}) => new ProjectProcessManager({
   ...options,
@@ -46,6 +49,76 @@ test('derives safe stable window names with collision-resistant project identiti
   assert.equal(projectWindowName(first), projectWindowName({ ...first }));
   assert.notEqual(projectWindowName(first), projectWindowName(second));
   assert.match(projectWindowName({ id: 'unicode', path: '/work/日本語' }), /^project-[a-f0-9]{12}$/);
+});
+
+test('discards stale state when a restarted tmux server reuses window and pane IDs', async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'dcc-reused-tmux-id-'));
+  const stateFile = path.join(directory, 'processes.json');
+  const socketName = `dcc-reuse-test-${process.pid}`;
+  const sessionName = `dcc-reuse-session-${process.pid}`;
+  const project = {
+    id: 'managed-project',
+    path: directory,
+    startCommand: 'sleep 20',
+  };
+  let recoveredManager;
+  t.after(() => {
+    recoveredManager?.releaseStateLock();
+    try {
+      execFileSync('tmux', ['-L', socketName, 'kill-server'], { stdio: 'ignore' });
+    } catch {
+      // The isolated server may already be gone.
+    }
+  });
+
+  const firstManager = new ProjectProcessManager({
+    stateFile,
+    sessionName,
+    tmuxSocketName: socketName,
+  });
+  await firstManager.start(project);
+  const original = { ...firstManager.processes.get(project.id) };
+  firstManager.releaseStateLock();
+  execFileSync('tmux', ['-L', socketName, 'kill-server']);
+
+  const reused = execFileSync('tmux', [
+    '-L', socketName, 'new-session', '-d', '-P', '-F', '#{session_id}\t#{window_id}\t#{pane_id}',
+    '-s', sessionName, '-n', original.windowName, 'sleep 20',
+  ], { encoding: 'utf8' }).trim().split('\t');
+  assert.deepEqual(reused, [original.sessionId, original.windowId, original.paneId]);
+  execFileSync('tmux', [
+    '-L', socketName, 'set-option', '-p', '-t', original.paneId, '@dcc_owner_token', 'unrelated-owner',
+  ]);
+  const unrelatedPid = Number(execFileSync('tmux', [
+    '-L', socketName, 'display-message', '-p', '-t', original.paneId, '#{pane_pid}',
+  ], { encoding: 'utf8' }).trim());
+
+  recoveredManager = new ProjectProcessManager({
+    stateFile,
+    sessionName,
+    tmuxSocketName: socketName,
+  });
+  assert.equal(recoveredManager.processes.has(project.id), false);
+  assert.equal(recoveredManager.isRunning(project.id), false);
+  await recoveredManager.stopAll();
+  assert.doesNotThrow(() => process.kill(unrelatedPid, 0));
+});
+
+test('supervisor falls back to ps when procfs is unavailable', async (t) => {
+  const startedAt = Date.now();
+  const supervisor = spawn(process.execPath, [processSupervisorPath, 'sleep 0.25 &'], {
+    detached: true,
+    env: { ...process.env, DEV_CONTROL_CENTER_PROC_DIRECTORY: '/proc-that-does-not-exist' },
+    stdio: 'ignore',
+  });
+  t.after(() => {
+    if (supervisor.exitCode === null) process.kill(-supervisor.pid, 'SIGKILL');
+  });
+
+  const [exitCode, signal] = await once(supervisor, 'exit', { signal: AbortSignal.timeout(2000) });
+  assert.equal(exitCode, 0);
+  assert.equal(signal, null);
+  assert.ok(Date.now() - startedAt >= 200);
 });
 
 test('accepts terminal input through the project tmux window', async (t) => {

@@ -31,6 +31,7 @@ export class ProjectProcessManager {
     stateFile = null,
     sessionName = 'dev-control-center',
     tmuxPath = 'tmux',
+    tmuxSocketName = null,
     startupDelay = 150,
     stopTimeout = 2000,
     pollInterval = 25,
@@ -43,6 +44,7 @@ export class ProjectProcessManager {
     this.stateFile = stateFile;
     this.sessionName = sessionName;
     this.tmuxPath = tmuxPath;
+    this.tmuxSocketName = tmuxSocketName;
     this.startupDelay = startupDelay;
     this.stopTimeout = stopTimeout;
     this.pollInterval = pollInterval;
@@ -156,7 +158,7 @@ export class ProjectProcessManager {
       throw new ProjectError('already_running', 'Project is already running.');
     }
 
-    let managed = this.processes.get(project.id) ?? this.#findWindow(projectWindowName(project));
+    let managed = this.processes.get(project.id);
     if (managed) {
       const pane = this.#paneState(managed);
       if (pane && !pane.dead) {
@@ -188,7 +190,8 @@ export class ProjectProcessManager {
 
   async #createWindow(project) {
     const windowName = projectWindowName(project);
-    const format = '#{window_id}\t#{pane_id}';
+    const token = randomUUID();
+    const format = '#{session_id}\t#{window_id}\t#{pane_id}';
     let result;
     const newWindowArguments = ['new-window', '-d', '-P', '-F', format, '-t', this.sessionName, '-n', windowName, '-c', project.path];
     if (this.#sessionExists()) {
@@ -201,14 +204,24 @@ export class ProjectProcessManager {
         result = await this.#tmux(newWindowArguments);
       }
     }
-    const [windowId, paneId] = result.stdout.trim().split('\t');
-    if (!/^@\d+$/.test(windowId) || !/^%\d+$/.test(paneId)) throw new Error('tmux did not return a window and pane identity');
-    const managed = { windowName, windowId, paneId };
+    const [sessionId, windowId, paneId] = result.stdout.trim().split('\t');
+    if (!/^\$\d+$/.test(sessionId) || !/^@\d+$/.test(windowId) || !/^%\d+$/.test(paneId)) {
+      throw new Error('tmux did not return a session, window, and pane identity');
+    }
+    const managed = {
+      sessionName: this.sessionName,
+      sessionId,
+      windowName,
+      windowId,
+      paneId,
+      token,
+    };
     try {
+      await this.#tmux(['set-option', '-p', '-t', paneId, '@dcc_owner_token', token]);
       await this.#tmux(['set-option', '-w', '-t', windowId, 'remain-on-exit', 'on']);
       await this.#tmux(['set-option', '-w', '-t', windowId, 'automatic-rename', 'off']);
       await this.#tmux(['set-option', '-w', '-t', windowId, 'allow-rename', 'off']);
-      const command = `exec ${[process.execPath, processSupervisorPath, project.startCommand].map(shellQuote).join(' ')}`;
+      const command = `exec ${[process.execPath, processSupervisorPath, project.startCommand, token].map(shellQuote).join(' ')}`;
       await this.#tmux(['respawn-pane', '-k', '-t', paneId, '-c', project.path, command]);
       return managed;
     } catch (error) {
@@ -225,18 +238,23 @@ export class ProjectProcessManager {
     }
 
     const pane = this.#paneState(managed);
-    if (!pane || pane.dead) {
+    if (!pane) {
+      this.#forget(id, managed);
+      if (requireRunning) throw new ProjectError('not_running', 'Project is not running.');
+      return;
+    }
+    if (pane.dead) {
       if (requireRunning) throw new ProjectError('not_running', 'Project is not running.');
       await this.#killWindow(managed);
       this.#forget(id, managed);
       return;
     }
 
-    this.#signalPane(pane.pid, 'SIGTERM');
+    this.#signalPane(managed, 'SIGTERM');
     let deadline = Date.now() + this.stopTimeout;
     while (this.isRunning(id) && Date.now() < deadline) await delay(this.pollInterval);
     if (this.isRunning(id)) {
-      this.#signalPane(pane.pid, 'SIGKILL');
+      this.#signalPane(managed, 'SIGKILL');
       deadline = Date.now() + this.stopTimeout;
       while (this.isRunning(id) && Date.now() < deadline) await delay(this.pollInterval);
     }
@@ -245,10 +263,11 @@ export class ProjectProcessManager {
     this.#forget(id, managed);
   }
 
-  #signalPane(pid, signal) {
-    if (!Number.isInteger(pid)) return;
+  #signalPane(managed, signal) {
+    const pane = this.#paneState(managed);
+    if (!pane || !Number.isInteger(pane.pid)) return;
     try {
-      process.kill(-pid, signal);
+      process.kill(-pane.pid, signal);
     } catch (error) {
       if (error.code !== 'ESRCH') throw error;
     }
@@ -261,17 +280,20 @@ export class ProjectProcessManager {
   }
 
   #sessionExists() {
-    return spawnSync(this.tmuxPath, ['has-session', '-t', `=${this.sessionName}`], { stdio: 'ignore' }).status === 0;
+    return this.#tmuxSync(['has-session', '-t', `=${this.sessionName}`], { stdio: 'ignore' }).status === 0;
   }
 
   #paneState(managed) {
-    const result = spawnSync(this.tmuxPath, [
+    const result = this.#tmuxSync([
       'display-message', '-p', '-t', managed.paneId,
-      '#{pane_id}\t#{pane_dead}\t#{@dcc_exit_status}\t#{pane_dead_signal}\t#{pane_pid}',
+      '#{session_name}\t#{session_id}\t#{window_name}\t#{window_id}\t#{pane_id}\t#{@dcc_owner_token}\t#{pane_dead}\t#{@dcc_exit_status}\t#{pane_dead_signal}\t#{pane_pid}',
     ], { encoding: 'utf8' });
     if (result.status !== 0) return null;
-    const [paneId, dead, status, signal, pid] = result.stdout.trim().split('\t');
-    if (paneId !== managed.paneId) return null;
+    const [sessionName, sessionId, windowName, windowId, paneId, token, dead, status, signal, pid]
+      = result.stdout.trim().split('\t');
+    if (sessionName !== managed.sessionName || sessionId !== managed.sessionId
+      || windowName !== managed.windowName || windowId !== managed.windowId
+      || paneId !== managed.paneId || token !== managed.token) return null;
     return {
       dead: dead === '1',
       status: status === '' ? null : Number(status),
@@ -280,20 +302,8 @@ export class ProjectProcessManager {
     };
   }
 
-  #findWindow(windowName) {
-    const result = spawnSync(this.tmuxPath, [
-      'list-windows', '-t', `=${this.sessionName}`, '-F', '#{window_name}\t#{window_id}\t#{pane_id}',
-    ], { encoding: 'utf8' });
-    if (result.status !== 0) return null;
-    for (const line of result.stdout.trim().split('\n')) {
-      const [name, windowId, paneId] = line.split('\t');
-      if (name === windowName) return { windowName, windowId, paneId };
-    }
-    return null;
-  }
-
   async #killWindow(managed) {
-    if (!managed?.windowId) return;
+    if (!managed?.windowId || !this.#paneState(managed)) return;
     try {
       await this.#tmux(['kill-window', '-t', managed.windowId]);
     } catch (error) {
@@ -319,12 +329,17 @@ export class ProjectProcessManager {
     }
 
     for (const record of records) {
-      if (typeof record.id !== 'string' || typeof record.windowName !== 'string'
-        || !/^@\d+$/.test(record.windowId) || !/^%\d+$/.test(record.paneId)) continue;
+      if (typeof record.id !== 'string' || record.sessionName !== this.sessionName
+        || !/^\$\d+$/.test(record.sessionId) || typeof record.windowName !== 'string'
+        || !/^@\d+$/.test(record.windowId) || !/^%\d+$/.test(record.paneId)
+        || typeof record.token !== 'string' || record.token.length < 32) continue;
       const managed = {
+        sessionName: record.sessionName,
+        sessionId: record.sessionId,
         windowName: record.windowName,
         windowId: record.windowId,
         paneId: record.paneId,
+        token: record.token,
       };
       if (this.#paneState(managed)) this.processes.set(record.id, managed);
     }
@@ -342,12 +357,20 @@ export class ProjectProcessManager {
 
   async #tmux(args) {
     try {
-      return await execFileAsync(this.tmuxPath, args);
+      return await execFileAsync(this.tmuxPath, this.#tmuxArguments(args));
     } catch (error) {
       const detail = error.code === 'ENOENT' ? `${this.tmuxPath} is not installed`
         : (error.stderr || error.message).trim();
       throw new Error(detail, { cause: error });
     }
+  }
+
+  #tmuxSync(args, options) {
+    return spawnSync(this.tmuxPath, this.#tmuxArguments(args), options);
+  }
+
+  #tmuxArguments(args) {
+    return this.tmuxSocketName ? ['-L', this.tmuxSocketName, ...args] : args;
   }
 
   #acquireStateLock() {
