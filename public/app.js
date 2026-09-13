@@ -175,15 +175,17 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
   }
 
   function render() {
-    refreshButton.disabled = loadingProjects;
-    saveButton.disabled = savingProject;
+    const projectActionPending = pendingProjects.size > 0;
+    const mutationsBlocked = loadingProjects || savingProject || projectActionPending;
+    refreshButton.disabled = mutationsBlocked;
+    saveButton.disabled = mutationsBlocked;
     cancelButton.disabled = savingProject;
     if (!projects.length) {
       projectsElement.innerHTML = '<p class="empty">No projects registered yet.</p>';
       return;
     }
     projectsElement.replaceChildren(...projects.map((project) => {
-      const busy = pendingProjects.has(project.id);
+      const busy = mutationsBlocked;
       const article = documentObject.createElement('article');
       article.className = 'project';
       article.setAttribute('aria-busy', String(busy));
@@ -249,7 +251,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
   }
 
   async function performProjectAction(project, label, request, includeBranches) {
-    if (pendingProjects.has(project.id)) return;
+    if (loadingProjects || savingProject || pendingProjects.size > 0) return;
     pendingProjects.add(project.id);
     projectMessages.set(project.id, { text: `${label} in progress…`, error: false });
     render();
@@ -304,7 +306,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
   }
 
   async function refreshGit(project) {
-    if (pendingProjects.has(project.id)) return;
+    if (loadingProjects || savingProject || pendingProjects.size > 0) return;
     pendingProjects.add(project.id);
     projectMessages.set(project.id, { text: 'Refreshing Git state…', error: false });
     render();
@@ -319,8 +321,8 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
     }
   }
 
-  async function loadProjects(clearMessage = true) {
-    if (loadingProjects) return;
+  async function loadProjects(clearMessage = true, reconcileMutation = false) {
+    if (loadingProjects || (!reconcileMutation && (savingProject || pendingProjects.size > 0))) return;
     loadingProjects = true;
     if (clearMessage) message.textContent = '';
     render();
@@ -358,7 +360,8 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
   }
 
   async function deleteProject(project) {
-    if (pendingProjects.has(project.id) || !confirmImpl(`Delete ${project.name}?`)) return;
+    if (loadingProjects || savingProject || pendingProjects.size > 0
+      || !confirmImpl(`Delete ${project.name}?`)) return;
     pendingProjects.add(project.id);
     projectMessages.set(project.id, { text: 'Delete in progress…', error: false });
     render();
@@ -368,7 +371,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
       projects = projects.filter(({ id }) => id !== project.id);
       branchStates.delete(project.id);
       projectMessages.delete(project.id);
-      await loadProjects(false);
+      await loadProjects(false, true);
     } catch (error) {
       projectMessages.set(project.id, { text: actionError('Delete', error), error: true });
     } finally {
@@ -379,7 +382,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
 
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
-    if (savingProject) return;
+    if (loadingProjects || savingProject || pendingProjects.size > 0) return;
     savingProject = true;
     message.textContent = 'Saving project…';
     render();
@@ -392,7 +395,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
       }, fetchImpl);
       resetForm();
       message.textContent = 'Project saved.';
-      await loadProjects(false);
+      await loadProjects(false, true);
     } catch (error) {
       message.textContent = actionError('Save', error);
     } finally {
@@ -403,7 +406,8 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
 
   cancelButton.addEventListener('click', resetForm);
   refreshButton.addEventListener('click', () => loadProjects());
-  loadProjects();
+  const ready = loadProjects();
+  return { ready };
 }
 
 if (typeof document !== 'undefined') initDashboard();
