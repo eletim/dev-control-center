@@ -270,6 +270,86 @@ test('removes an unowned window recorded immediately after tmux creates it', asy
   }
 });
 
+test('keeps a respawned pane pending until its in-pane start marker is written', async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'dcc-delayed-marker-'));
+  const stateFile = path.join(directory, 'processes.json');
+  const markerGate = path.join(directory, 'delay-command-marker');
+  const respawnReturned = path.join(directory, 'respawn-returned');
+  const tmuxWrapper = path.join(directory, 'delaying-tmux');
+  const tmuxExecutable = execFileSync('sh', ['-c', 'command -v tmux'], { encoding: 'utf8' }).trim();
+  const touchExecutable = execFileSync('sh', ['-c', 'command -v touch'], { encoding: 'utf8' }).trim();
+  const socketName = `dcc-delayed-marker-${process.pid}`;
+  const sessionName = `dcc-delayed-marker-session-${process.pid}`;
+  const project = { id: 'delayed-marker', path: directory, startCommand: 'sleep 20' };
+  let interrupted;
+  let manager;
+  t.after(async () => {
+    if (interrupted?.exitCode === null) interrupted.kill('SIGKILL');
+    await manager?.stopAll();
+    manager?.releaseStateLock();
+    try {
+      execFileSync('tmux', ['-L', socketName, 'kill-server'], { stdio: 'ignore' });
+    } catch {
+      // Recovery and stopAll normally remove the isolated server's windows.
+    }
+  });
+
+  await writeFile(markerGate, '');
+  await writeFile(tmuxWrapper, [
+    '#!/bin/sh',
+    'if [ "$1" = "set-option" ]; then',
+    '  case " $* " in',
+    `    *" @dcc_command_started "*) while [ -f ${shellQuote(markerGate)} ]; do /bin/sleep 0.02; done ;;`,
+    '  esac',
+    'fi',
+    'case " $* " in',
+    `  *" respawn-pane "*) ${shellQuote(tmuxExecutable)} "$@"; status=$?; ${shellQuote(touchExecutable)} ${shellQuote(respawnReturned)}; exit "$status" ;;`,
+    'esac',
+    `exec ${shellQuote(tmuxExecutable)} "$@"`,
+    '',
+  ].join('\n'));
+  await chmod(tmuxWrapper, 0o755);
+  const childScript = [
+    `import { ProjectProcessManager } from ${JSON.stringify(new URL('../src/project-process-manager.js', import.meta.url).href)}`,
+    `const manager = new ProjectProcessManager(${JSON.stringify({
+      stateFile, sessionName, tmuxPath: tmuxWrapper, tmuxSocketName: socketName, startupDelay: 2000,
+    })})`,
+    `await manager.start(${JSON.stringify(project)})`,
+  ].join(';');
+  interrupted = spawn(process.execPath, ['--input-type=module', '-e', childScript], { stdio: 'ignore' });
+  await waitFor(async () => Boolean(await readFile(respawnReturned)));
+  await pause(100);
+
+  const [pending] = JSON.parse(await readFile(stateFile, 'utf8'));
+  assert.equal(pending.pending, true);
+  const markers = execFileSync(tmuxExecutable, [
+    '-L', socketName, 'display-message', '-p', '-t', pending.paneId,
+    '#{@dcc_owner_token}\t#{@dcc_command_started}',
+  ], { encoding: 'utf8' }).replace(/\n$/, '').split('\t');
+  assert.deepEqual(markers, [pending.token, '']);
+
+  interrupted.kill('SIGKILL');
+  const [exitCode, signal] = await once(interrupted, 'exit', { signal: AbortSignal.timeout(2000) });
+  assert.equal(exitCode, null);
+  assert.equal(signal, 'SIGKILL');
+
+  const vulnerableRecord = { ...pending };
+  delete vulnerableRecord.pending;
+  delete vulnerableRecord.sessionCreated;
+  delete vulnerableRecord.serverPid;
+  await writeFile(stateFile, `${JSON.stringify([vulnerableRecord], null, 2)}\n`);
+  manager = new ProjectProcessManager({
+    stateFile, sessionName, tmuxPath: tmuxExecutable, tmuxSocketName: socketName,
+  });
+  assert.equal(manager.processes.has(project.id), false);
+  assert.deepEqual(JSON.parse(await readFile(stateFile, 'utf8')), []);
+  await manager.start(project);
+  const projectWindows = execFileSync(tmuxExecutable, [
+    '-L', socketName, 'list-windows', '-t', `=${sessionName}`, '-F', '#{window_name}',
+  ], { encoding: 'utf8' }).trim().split('\n').filter((name) => name === projectWindowName(project));
+  assert.equal(projectWindows.length, 1);
+});
+
 test('retains recovery state when tmux cannot be invoked', async (t) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'dcc-query-recovery-'));
   const stateFile = path.join(directory, 'processes.json');

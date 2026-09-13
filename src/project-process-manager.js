@@ -180,16 +180,27 @@ export class ProjectProcessManager {
     this.processes.set(project.id, pending);
     this.#persist();
 
+    let startupDeadline;
     try {
       managed = await this.#createWindow(project, pending);
+      startupDeadline = Date.now() + this.startupDelay;
+      let pane = this.#paneState(managed, false);
+      while (pane && !pane.dead && !pane.started && Date.now() < startupDeadline) {
+        await delay(Math.min(this.pollInterval, startupDeadline - Date.now()));
+        pane = this.#paneState(managed, false);
+      }
+      if (!pane?.started) {
+        throw new Error('tmux pane did not confirm that the Start Command began');
+      }
       this.processes.set(project.id, managed);
       this.#persist();
     } catch (error) {
+      await this.#killPendingWindow(pending);
       this.#forget(project.id, pending);
       throw new ProjectError('start_failed', `Could not start project in tmux: ${error.message}`);
     }
 
-    await delay(this.startupDelay);
+    await delay(Math.max(0, startupDeadline - Date.now()));
     const pane = this.#paneState(managed);
     if (pane?.dead && (pane.status !== 0 || pane.signal)) {
       const reason = pane.signal ? `signal ${pane.signal}` : `exit code ${pane.status}`;
@@ -313,6 +324,7 @@ export class ProjectProcessManager {
       || paneId !== managed.paneId || token !== managed.token
       || (requireStarted && commandStarted !== managed.token)) return null;
     return {
+      started: commandStarted === managed.token,
       dead: dead === '1',
       status: status === '' ? null : Number(status),
       signal: signal || null,
@@ -433,7 +445,9 @@ export class ProjectProcessManager {
         windowId: record.windowId,
         paneId: record.paneId,
       };
-      if (this.#paneState(managed)) this.#rememberRecoveredProcess(record.id, managed);
+      const pane = this.#paneState(managed, false);
+      if (pane?.started) this.#rememberRecoveredProcess(record.id, managed);
+      else if (pane) this.#tmuxQuery(['kill-window', '-t', managed.windowId], { encoding: 'utf8' });
     }
     this.#persist();
   }
