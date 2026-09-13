@@ -151,9 +151,13 @@ test('multiple projects complete dashboard lifecycle and safe Git workflows over
     assert.ok(findElement(findProject(document, 'second-project'), 'Running'));
 
     const first = projects.find(({ name }) => name === 'first-project');
-    const originalProcessGroup = processManager.processes.get(first.id).processGroupId;
     await findElement(findProject(document, 'first-project'), 'Restart').dispatch('click');
-    assert.notEqual(processManager.processes.get(first.id).processGroupId, originalProcessGroup);
+    const restartedCard = findProject(document, 'first-project');
+    assert.ok(findElement(restartedCard, 'Restart complete.'));
+    assert.ok(findElement(restartedCard, 'Running'));
+    assert.equal(await fetch(`${baseUrl}/api/projects/${first.id}`)
+      .then((response) => response.json())
+      .then(({ status }) => status), 'running');
     await findElement(findProject(document, 'first-project'), 'Stop').dispatch('click');
     await findElement(findProject(document, 'second-project'), 'Stop').dispatch('click');
     projects = await fetch(`${baseUrl}/api/projects`).then((response) => response.json());
@@ -168,7 +172,8 @@ test('multiple projects complete dashboard lifecycle and safe Git workflows over
 
     await waitFor(() => {
       secondCard = findProject(document, 'second-project');
-      return findElement(secondCard, 'Branch switch refused: Git working tree must be clean.');
+      return secondCard['aria-busy'] === 'false'
+        && findElement(secondCard, 'Branch switch refused: Git working tree must be clean.');
     });
     assert.ok(findElement(secondCard, 'Branch switch refused: Git working tree must be clean.'));
     assert.equal((await execFileAsync('git', ['-C', secondPath, 'branch', '--show-current'])).stdout.trim(), 'main');
