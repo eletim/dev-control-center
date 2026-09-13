@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { fetchRepository, listBranches, switchBranch, updateRepository } from './git-actions.js';
 import { getGitMetadata } from './git-metadata.js';
 import { ProjectProcessManager } from './project-process-manager.js';
 import { ProjectError } from './project-store.js';
@@ -48,6 +49,7 @@ export function createAppServer(store, processManager = new ProjectProcessManage
       const url = new URL(request.url, 'http://localhost');
       const match = url.pathname.match(/^\/api\/projects\/([^/]+)$/);
       const actionMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/(start|stop|restart)$/);
+      const gitActionMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/git\/(branches|fetch|update|switch)$/);
 
       if (request.method === 'GET' && url.pathname === '/api/projects') {
         const projects = await store.list();
@@ -65,6 +67,30 @@ export function createAppServer(store, processManager = new ProjectProcessManage
         const project = await processManager.perform(id, actionMatch[2], () => store.get(id));
         sendJson(response, 200, await present(project, processManager));
         return;
+      }
+
+      if (gitActionMatch) {
+        const id = decodeURIComponent(gitActionMatch[1]);
+        const action = gitActionMatch[2];
+        if (action === 'branches' && request.method === 'GET') {
+          const project = await store.get(id);
+          if (!project) throw new ProjectError('not_found', 'Project not found.');
+          sendJson(response, 200, { branches: await listBranches(project.path) });
+          return;
+        }
+        if (action !== 'branches' && request.method === 'POST') {
+          const input = action === 'switch' ? await readJson(request) : null;
+          const project = await processManager.withProjectLock(id, async () => {
+            const currentProject = await store.get(id);
+            if (!currentProject) throw new ProjectError('not_found', 'Project not found.');
+            if (action === 'fetch') await fetchRepository(currentProject.path);
+            else if (action === 'update') await updateRepository(currentProject.path);
+            else await switchBranch(currentProject.path, input?.branch);
+            return currentProject;
+          });
+          sendJson(response, 200, await present(project, processManager));
+          return;
+        }
       }
 
       if (match && request.method === 'GET') {
@@ -111,7 +137,10 @@ export function createAppServer(store, processManager = new ProjectProcessManage
       sendJson(response, 404, { error: 'not_found', message: 'Not found.' });
     } catch (error) {
       if (error instanceof ProjectError) {
-        const conflicts = ['duplicate_path', 'already_running', 'not_running', 'project_running'];
+        const conflicts = [
+          'duplicate_path', 'already_running', 'not_running', 'project_running',
+          'dirty_worktree', 'git_state_changed', 'non_fast_forward',
+        ];
         const status = error.code === 'not_found' ? 404
           : error.code === 'shutting_down' ? 503
             : conflicts.includes(error.code) ? 409 : 400;

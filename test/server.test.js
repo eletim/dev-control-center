@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp } from 'node:fs/promises';
+import { mkdir, mkdtemp, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -126,5 +126,59 @@ test('returns useful errors for invalid requests', async () => {
     assert.equal((await invalid.json()).error, 'invalid_input');
 
     assert.equal((await fetch(`${baseUrl}/api/projects/missing`)).status, 404);
+  });
+});
+
+test('exposes constrained Git actions and rechecks cleanliness inside the project queue', async () => {
+  await withServer(async (baseUrl, projectPath, processManager) => {
+    await execFileAsync('git', ['-C', projectPath, 'config', 'user.name', 'Dev Control Center Test']);
+    await execFileAsync('git', ['-C', projectPath, 'config', 'user.email', 'test@example.invalid']);
+    await writeFile(path.join(projectPath, 'README.md'), 'initial\n');
+    await execFileAsync('git', ['-C', projectPath, 'add', 'README.md']);
+    await execFileAsync('git', ['-C', projectPath, 'commit', '-qm', 'initial']);
+    await execFileAsync('git', ['-C', projectPath, 'branch', '-M', 'main']);
+    await execFileAsync('git', ['-C', projectPath, 'branch', 'topic']);
+    const project = await fetch(`${baseUrl}/api/projects`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: projectPath, startCommand: 'node app.js' }),
+    }).then((response) => response.json());
+
+    const branches = await fetch(`${baseUrl}/api/projects/${project.id}/git/branches`).then((response) => response.json());
+    assert.deepEqual(branches.branches, ['main', 'topic']);
+
+    let releaseLock;
+    let lockStarted;
+    const started = new Promise((resolve) => { lockStarted = resolve; });
+    const heldLock = processManager.withProjectLock(project.id, async () => {
+      lockStarted();
+      await new Promise((resolve) => { releaseLock = resolve; });
+    });
+    await started;
+    const switchRequest = fetch(`${baseUrl}/api/projects/${project.id}/git/switch`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ branch: 'topic' }),
+    });
+    await writeFile(path.join(projectPath, 'queued-change.txt'), 'local work\n');
+    releaseLock();
+    await heldLock;
+
+    const refused = await switchRequest;
+    assert.equal(refused.status, 409);
+    assert.equal((await refused.json()).error, 'dirty_worktree');
+    assert.equal((await execFileAsync('git', ['-C', projectPath, 'branch', '--show-current'])).stdout.trim(), 'main');
+
+    await unlink(path.join(projectPath, 'queued-change.txt'));
+    const switched = await fetch(`${baseUrl}/api/projects/${project.id}/git/switch`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ branch: 'topic' }),
+    });
+    assert.equal(switched.status, 200);
+    assert.equal((await switched.json()).git.branch, 'topic');
+
+    const unknownAction = await fetch(`${baseUrl}/api/projects/${project.id}/git/reset`, { method: 'POST' });
+    assert.equal(unknownAction.status, 404);
   });
 });
