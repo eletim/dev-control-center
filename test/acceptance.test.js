@@ -137,7 +137,11 @@ test('multiple projects complete dashboard lifecycle and safe Git workflows over
   const directory = await mkdtemp(path.join(os.tmpdir(), 'dcc-acceptance-'));
   const firstPath = path.join(directory, 'first-project');
   const secondPath = path.join(directory, 'second-project');
-  const processManager = new ProjectProcessManager({ stopTimeout: 250, startupDelay: 30 });
+  const processManager = new ProjectProcessManager({
+    stopTimeout: 250,
+    startupDelay: 30,
+    sessionName: `dcc-acceptance-test-${process.pid}`,
+  });
   const server = createAppServer(
     new ProjectStore(path.join(directory, 'projects.json')),
     processManager,
@@ -168,6 +172,11 @@ test('multiple projects complete dashboard lifecycle and safe Git workflows over
     await Promise.all(projects.map(({ id }) => (
       fetch(`${baseUrl}/api/projects/${id}/start`, { method: 'POST' })
     )));
+    const tmuxWindows = await execFileAsync('tmux', [
+      'list-windows', '-t', `=${processManager.sessionName}`, '-F', '#{window_name}',
+    ]).then(({ stdout }) => stdout.trim().split('\n'));
+    assert.equal(tmuxWindows.length, 2);
+    assert.equal(new Set(tmuxWindows).size, 2);
     await document.elements.get('refresh').dispatch('click');
     assert.ok(findElement(findProject(document, 'first-project'), 'Running'));
     assert.ok(findElement(findProject(document, 'second-project'), 'Running'));

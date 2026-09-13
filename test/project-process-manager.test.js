@@ -1,12 +1,18 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, readFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { ProjectProcessManager } from '../src/project-process-manager.js';
+import { projectWindowName, ProjectProcessManager } from '../src/project-process-manager.js';
 
 const pause = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 const shellQuote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
+let managerNumber = 0;
+const createManager = (options = {}) => new ProjectProcessManager({
+  ...options,
+  sessionName: `dcc-process-test-${process.pid}-${managerNumber += 1}`,
+});
 
 async function waitFor(check, timeout = 2000) {
   const deadline = Date.now() + timeout;
@@ -32,6 +38,36 @@ function pidIsAlive(pid) {
   }
 }
 
+test('derives safe stable window names with collision-resistant project identities', () => {
+  const first = { id: 'project-one', path: '/work/My Project!' };
+  const second = { id: 'project-two', path: '/other/My Project!' };
+
+  assert.match(projectWindowName(first), /^my-project-[a-f0-9]{12}$/);
+  assert.equal(projectWindowName(first), projectWindowName({ ...first }));
+  assert.notEqual(projectWindowName(first), projectWindowName(second));
+  assert.match(projectWindowName({ id: 'unicode', path: '/work/日本語' }), /^project-[a-f0-9]{12}$/);
+});
+
+test('accepts terminal input through the project tmux window', async (t) => {
+  const projectPath = await mkdtemp(path.join(os.tmpdir(), 'dcc-interactive-'));
+  const project = {
+    id: 'interactive',
+    path: projectPath,
+    startCommand: 'read answer; printf "received:%s\\n" "$answer"; sleep 20',
+  };
+  const manager = createManager({ stopTimeout: 250 });
+  t.after(() => manager.stopAll());
+
+  await manager.start(project);
+  const { paneId } = manager.processes.get(project.id);
+  execFileSync('tmux', ['send-keys', '-t', paneId, 'hello-from-human', 'Enter']);
+  const output = await waitFor(() => {
+    const captured = execFileSync('tmux', ['capture-pane', '-p', '-S', '-', '-t', paneId], { encoding: 'utf8' });
+    return captured.includes('received:hello-from-human') ? captured : null;
+  });
+  assert.match(output, /received:hello-from-human/);
+});
+
 test('starts one process group in the project path and stops its descendants', async (t) => {
   const projectPath = await mkdtemp(path.join(os.tmpdir(), 'dcc-process-'));
   await mkdir(path.join(projectPath, 'nested'));
@@ -48,7 +84,7 @@ test('starts one process group in the project path and stops its descendants', a
     'setInterval(() => {}, 1000)',
   ].join(';');
   const project = { id: 'demo', path: projectPath, startCommand: `${shellQuote(process.execPath)} -e ${shellQuote(script)}` };
-  const manager = new ProjectProcessManager({ stopTimeout: 250 });
+  const manager = createManager({ stopTimeout: 250 });
   t.after(async () => {
     if (manager.isRunning(project.id)) await manager.stop(project.id);
   });
@@ -75,16 +111,16 @@ test('restart replaces the managed process group', async (t) => {
     path: projectPath,
     startCommand: `${shellQuote(process.execPath)} -e ${shellQuote('setInterval(() => {}, 1000)')}`,
   };
-  const manager = new ProjectProcessManager({ stopTimeout: 250 });
+  const manager = createManager({ stopTimeout: 250 });
   t.after(async () => {
     if (manager.isRunning(project.id)) await manager.stop(project.id);
   });
 
   await manager.start(project);
-  const firstProcessGroup = manager.processes.get(project.id).processGroupId;
+  const firstPane = manager.processes.get(project.id).paneId;
   await manager.restart(project);
   assert.equal(manager.isRunning(project.id), true);
-  assert.notEqual(manager.processes.get(project.id).processGroupId, firstProcessGroup);
+  assert.notEqual(manager.processes.get(project.id).paneId, firstPane);
 });
 
 test('tracks and stops a command that clears its environment', async (t) => {
@@ -96,7 +132,7 @@ test('tracks and stops a command that clears its environment', async (t) => {
     path: projectPath,
     startCommand: `exec env -i ${shellQuote(process.execPath)} -e ${shellQuote(script)}`,
   };
-  const manager = new ProjectProcessManager({ stopTimeout: 250 });
+  const manager = createManager({ stopTimeout: 250 });
   let pid;
   t.after(async () => {
     if (manager.isRunning(project.id)) await manager.stopAll();
@@ -119,7 +155,7 @@ test('tracks and stops a server backgrounded by an exiting start command', async
     path: projectPath,
     startCommand: `sleep 20 & echo $! > ${shellQuote(pidFile)}`,
   };
-  const manager = new ProjectProcessManager({ stopTimeout: 250 });
+  const manager = createManager({ stopTimeout: 250 });
   let pid;
   t.after(async () => {
     if (manager.isRunning(project.id)) await manager.stopAll();
@@ -149,7 +185,7 @@ test('escalates to SIGKILL when a command process ignores SIGTERM', async (t) =>
     path: projectPath,
     startCommand: `${shellQuote(process.execPath)} -e ${shellQuote(script)}`,
   };
-  const manager = new ProjectProcessManager({ stopTimeout: 100, pollInterval: 10 });
+  const manager = createManager({ stopTimeout: 100, pollInterval: 10 });
   let pid;
   t.after(async () => {
     if (manager.isRunning(project.id)) await manager.stopAll();
@@ -165,23 +201,30 @@ test('escalates to SIGKILL when a command process ignores SIGTERM', async (t) =>
   assert.equal(manager.isRunning(project.id), false);
 });
 
-test('reports stopped when the managed command exits on its own', async () => {
+test('retains a completed command window and its output', async (t) => {
   const projectPath = await mkdtemp(path.join(os.tmpdir(), 'dcc-exit-'));
   const project = {
     id: 'short-lived',
     path: projectPath,
-    startCommand: `${shellQuote(process.execPath)} -e ${shellQuote('process.exit(0)')}`,
+    startCommand: `${shellQuote(process.execPath)} -e ${shellQuote("console.log('retained output')")}`,
   };
-  const manager = new ProjectProcessManager();
+  const manager = createManager();
+  t.after(() => manager.stopAll());
 
   await manager.start(project);
   await waitFor(() => !manager.isRunning(project.id));
   assert.equal(manager.isRunning(project.id), false);
+  const managed = manager.processes.get(project.id);
+  assert.ok(managed);
+  assert.match(execFileSync('tmux', ['capture-pane', '-p', '-S', '-', '-t', managed.paneId], { encoding: 'utf8' }), /retained output/);
+  await manager.remove(project.id);
+  assert.equal(manager.processes.has(project.id), false);
 });
 
-test('rejects commands that fail immediately', async () => {
+test('rejects commands that fail immediately and retains their windows', async (t) => {
   const projectPath = await mkdtemp(path.join(os.tmpdir(), 'dcc-failed-start-'));
-  const manager = new ProjectProcessManager({ startupDelay: 100 });
+  const manager = createManager({ startupDelay: 100 });
+  t.after(() => manager.stopAll());
 
   for (const [id, startCommand] of [
     ['missing', 'command-that-does-not-exist-dcc'],
@@ -189,6 +232,7 @@ test('rejects commands that fail immediately', async () => {
   ]) {
     await assert.rejects(manager.start({ id, path: projectPath, startCommand }), { code: 'start_failed' });
     assert.equal(manager.isRunning(id), false);
+    assert.ok(manager.processes.get(id));
   }
 });
 
@@ -199,7 +243,7 @@ test('shutdown seals lifecycle work, drains a queued start, and stops it', async
     path: projectPath,
     startCommand: `${shellQuote(process.execPath)} -e ${shellQuote('setInterval(() => {}, 1000)')}`,
   };
-  const manager = new ProjectProcessManager({ stopTimeout: 250 });
+  const manager = createManager({ stopTimeout: 250 });
   let releaseMutation;
   const mutationGate = new Promise((resolve) => { releaseMutation = resolve; });
   const mutation = manager.withProjectLock(project.id, () => mutationGate);
