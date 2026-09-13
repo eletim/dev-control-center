@@ -2,6 +2,8 @@ import { spawn } from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
 
 const command = process.argv[2];
+// Stay available as the group's identity while command processes handle graceful shutdown.
+process.on('SIGTERM', () => {});
 const child = spawn(command, { shell: true, stdio: 'ignore' });
 
 function hasLiveCommandProcess() {

@@ -135,6 +135,36 @@ test('tracks and stops a server backgrounded by an exiting start command', async
   await waitFor(() => !pidIsAlive(pid));
 });
 
+test('escalates to SIGKILL when a command process ignores SIGTERM', async (t) => {
+  const projectPath = await mkdtemp(path.join(os.tmpdir(), 'dcc-term-resistant-'));
+  const pidFile = path.join(projectPath, 'server.pid');
+  const script = [
+    "const { writeFileSync } = require('node:fs')",
+    "process.on('SIGTERM', () => {})",
+    `writeFileSync(${JSON.stringify(pidFile)}, String(process.pid))`,
+    'setInterval(() => {}, 1000)',
+  ].join(';');
+  const project = {
+    id: 'term-resistant',
+    path: projectPath,
+    startCommand: `${shellQuote(process.execPath)} -e ${shellQuote(script)}`,
+  };
+  const manager = new ProjectProcessManager({ stopTimeout: 100, pollInterval: 10 });
+  let pid;
+  t.after(async () => {
+    if (manager.isRunning(project.id)) await manager.stopAll();
+    if (pid && pidIsAlive(pid)) process.kill(pid, 'SIGKILL');
+  });
+
+  await manager.start(project);
+  pid = Number(await waitFor(async () => readFile(pidFile, 'utf8')));
+  const stopStarted = Date.now();
+  await manager.stop(project.id);
+  assert.ok(Date.now() - stopStarted >= 80);
+  await waitFor(() => !pidIsAlive(pid));
+  assert.equal(manager.isRunning(project.id), false);
+});
+
 test('reports stopped when the managed command exits on its own', async () => {
   const projectPath = await mkdtemp(path.join(os.tmpdir(), 'dcc-exit-'));
   const project = {
