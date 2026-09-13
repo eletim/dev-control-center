@@ -57,7 +57,7 @@ test('reconciles survivors after controller restart and stops groups on graceful
   const dataFile = path.join(directory, 'projects.json');
   const processFile = path.join(directory, 'processes.json');
   await mkdir(projectPath);
-  const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify('setInterval(() => {}, 1000)')}`;
+  const command = `exec env -i ${JSON.stringify(process.execPath)} -e ${JSON.stringify('setInterval(() => {}, 1000)')}`;
   const project = { id: 'managed-project', path: projectPath, startCommand: command };
   await writeFile(dataFile, `${JSON.stringify([project])}\n`);
 

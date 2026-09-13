@@ -126,7 +126,14 @@ export class ProjectProcessManager {
       shell: true,
       stdio: 'ignore',
     });
-    const managed = { child, processGroupId: child.pid, token, local: true, monitor: null };
+    const managed = {
+      child,
+      processGroupId: child.pid,
+      processGroupStartTime: null,
+      token,
+      local: true,
+      monitor: null,
+    };
     this.processes.set(project.id, managed);
     const exited = new Promise((resolve) => child.once('exit', (code, signal) => resolve({ code, signal })));
 
@@ -135,6 +142,8 @@ export class ProjectProcessManager {
         child.once('spawn', resolve);
         child.once('error', reject);
       });
+      managed.processGroupStartTime = this.#processStartTime(child.pid);
+      if (!managed.processGroupStartTime) throw new Error('process exited before its identity could be recorded');
       this.#persist();
     } catch (error) {
       if (managed.processGroupId && this.#ownsProcessGroup(managed)) await this.#stop(project.id, false);
@@ -202,6 +211,26 @@ export class ProjectProcessManager {
       }
     }
 
+    if (!managed.processGroupStartTime) {
+      if (!this.#tokenOwnsProcessGroup(managed, processIds)) return false;
+      managed.processGroupStartTime = this.#processStartTime(managed.processGroupId);
+      if (!managed.processGroupStartTime) return false;
+      this.#persist();
+    }
+
+    if (this.#processStartTime(managed.processGroupId) !== managed.processGroupStartTime) return false;
+    return processIds.some((processId) => {
+      try {
+        const stat = readFileSync(`/proc/${processId}/stat`, 'utf8');
+        const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+        return fields[0] !== 'Z' && Number(fields[2]) === managed.processGroupId;
+      } catch {
+        return false;
+      }
+    });
+  }
+
+  #tokenOwnsProcessGroup(managed, processIds) {
     const expectedToken = `${processTokenName}=${managed.token}`;
     return processIds.some((processId) => {
       try {
@@ -254,6 +283,7 @@ export class ProjectProcessManager {
     const records = [...this.processes.entries()].map(([id, managed]) => ({
       id,
       processGroupId: managed.processGroupId,
+      processGroupStartTime: managed.processGroupStartTime,
       token: managed.token,
     }));
     mkdirSync(path.dirname(this.stateFile), { recursive: true });

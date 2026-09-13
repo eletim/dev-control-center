@@ -87,6 +87,30 @@ test('restart replaces the managed process group', async (t) => {
   assert.notEqual(manager.processes.get(project.id).processGroupId, firstProcessGroup);
 });
 
+test('tracks and stops a command that clears its environment', async (t) => {
+  const projectPath = await mkdtemp(path.join(os.tmpdir(), 'dcc-empty-env-'));
+  const pidFile = path.join(projectPath, 'process.pid');
+  const script = `require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000)`;
+  const project = {
+    id: 'empty-env',
+    path: projectPath,
+    startCommand: `exec env -i ${shellQuote(process.execPath)} -e ${shellQuote(script)}`,
+  };
+  const manager = new ProjectProcessManager({ stopTimeout: 250 });
+  let pid;
+  t.after(async () => {
+    if (manager.isRunning(project.id)) await manager.stopAll();
+    if (pid && pidIsAlive(pid)) process.kill(pid, 'SIGKILL');
+  });
+
+  await manager.start(project);
+  pid = Number(await waitFor(async () => readFile(pidFile, 'utf8')));
+  assert.equal(manager.isRunning(project.id), true);
+  await assert.rejects(manager.start(project), { code: 'already_running' });
+  await manager.stop(project.id);
+  await waitFor(() => !pidIsAlive(pid));
+});
+
 test('reports stopped when the managed command exits on its own', async () => {
   const projectPath = await mkdtemp(path.join(os.tmpdir(), 'dcc-exit-'));
   const project = {

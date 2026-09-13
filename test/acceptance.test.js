@@ -112,6 +112,27 @@ async function initializeRepository(repositoryPath) {
   await execFileAsync('git', ['-C', repositoryPath, 'branch', 'topic']);
 }
 
+async function commitFile(repositoryPath, filename, contents, message) {
+  await writeFile(path.join(repositoryPath, filename), contents);
+  await execFileAsync('git', ['-C', repositoryPath, 'add', filename]);
+  await execFileAsync('git', ['-C', repositoryPath, 'commit', '-qm', message]);
+}
+
+async function initializeRemoteRepository(directory, checkoutPath) {
+  const remotePath = path.join(directory, 'remote.git');
+  const sourcePath = path.join(directory, 'remote-source');
+  await execFileAsync('git', ['init', '--bare', '-q', remotePath]);
+  await initializeRepository(sourcePath);
+  await execFileAsync('git', ['-C', sourcePath, 'remote', 'add', 'origin', remotePath]);
+  await execFileAsync('git', ['-C', sourcePath, 'push', '-qu', 'origin', 'main']);
+  await execFileAsync('git', ['-C', remotePath, 'symbolic-ref', 'HEAD', 'refs/heads/main']);
+  await execFileAsync('git', ['clone', '-q', remotePath, checkoutPath]);
+  await execFileAsync('git', ['-C', checkoutPath, 'config', 'user.name', 'Acceptance Test']);
+  await execFileAsync('git', ['-C', checkoutPath, 'config', 'user.email', 'acceptance@example.invalid']);
+  await execFileAsync('git', ['-C', checkoutPath, 'branch', 'topic']);
+  return sourcePath;
+}
+
 test('multiple projects complete dashboard lifecycle and safe Git workflows over HTTP', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'dcc-acceptance-'));
   const firstPath = path.join(directory, 'first-project');
@@ -123,7 +144,8 @@ test('multiple projects complete dashboard lifecycle and safe Git workflows over
   );
 
   try {
-    await Promise.all([initializeRepository(firstPath), initializeRepository(secondPath)]);
+    const remoteSource = await initializeRemoteRepository(directory, firstPath);
+    await initializeRepository(secondPath);
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
     const baseUrl = `http://127.0.0.1:${server.address().port}`;
     const document = createDocument();
@@ -193,6 +215,61 @@ test('multiple projects complete dashboard lifecycle and safe Git workflows over
     assert.ok(findElement(secondCard, 'Branch switch complete.'));
     assert.ok(findElement(secondCard, 'topic'));
     assert.equal((await execFileAsync('git', ['-C', secondPath, 'branch', '--show-current'])).stdout.trim(), 'topic');
+
+    const headBeforeFetch = (await execFileAsync('git', ['-C', firstPath, 'rev-parse', 'HEAD'])).stdout.trim();
+    await commitFile(remoteSource, 'remote-one.txt', 'remote one\n', 'remote update one');
+    await execFileAsync('git', ['-C', remoteSource, 'push', '-q']);
+    let firstCard = findProject(document, 'first-project');
+    await findElement(firstCard, 'Fetch').dispatch('click');
+    firstCard = findProject(document, 'first-project');
+    assert.ok(findElement(firstCard, 'Fetch complete.'));
+    assert.ok(findElement(firstCard, '0 ahead / 1 behind'));
+    assert.equal((await execFileAsync('git', ['-C', firstPath, 'rev-parse', 'HEAD'])).stdout.trim(), headBeforeFetch);
+
+    await findElement(firstCard, 'Update (fast-forward)').dispatch('click');
+    firstCard = findProject(document, 'first-project');
+    assert.ok(findElement(firstCard, 'Fast-forward update complete.'));
+    assert.ok(findElement(firstCard, '0 ahead / 0 behind'));
+    const firstRemoteHead = (await execFileAsync('git', ['-C', remoteSource, 'rev-parse', 'HEAD'])).stdout.trim();
+    assert.equal((await execFileAsync('git', ['-C', firstPath, 'rev-parse', 'HEAD'])).stdout.trim(), firstRemoteHead);
+
+    await commitFile(remoteSource, 'remote-two.txt', 'remote two\n', 'remote update two');
+    await execFileAsync('git', ['-C', remoteSource, 'push', '-q']);
+    await writeFile(path.join(firstPath, 'dirty.txt'), 'keep this local change\n');
+    const cleanHead = (await execFileAsync('git', ['-C', firstPath, 'rev-parse', 'HEAD'])).stdout.trim();
+    await findElement(firstCard, 'Update (fast-forward)').dispatch('click');
+    firstCard = findProject(document, 'first-project');
+    assert.ok(findElement(firstCard, 'Fast-forward update refused: Git working tree must be clean.'));
+    assert.equal((await execFileAsync('git', ['-C', firstPath, 'rev-parse', 'HEAD'])).stdout.trim(), cleanHead);
+    assert.equal(await execFileAsync('git', ['-C', firstPath, 'status', '--porcelain'])
+      .then(({ stdout }) => stdout.trim()), '?? dirty.txt');
+    await unlink(path.join(firstPath, 'dirty.txt'));
+
+    await findElement(firstCard, 'Update (fast-forward)').dispatch('click');
+    await commitFile(firstPath, 'local-commit.txt', 'local commit\n', 'local update');
+    await commitFile(remoteSource, 'remote-three.txt', 'remote three\n', 'remote update three');
+    await execFileAsync('git', ['-C', remoteSource, 'push', '-q']);
+    const divergentHead = (await execFileAsync('git', ['-C', firstPath, 'rev-parse', 'HEAD'])).stdout.trim();
+    firstCard = findProject(document, 'first-project');
+    await findElement(firstCard, 'Update (fast-forward)').dispatch('click');
+    firstCard = findProject(document, 'first-project');
+    assert.ok(findElement(firstCard, 'Fast-forward update refused: Current branch cannot be updated with a fast-forward.'));
+    assert.ok(findElement(firstCard, '1 ahead / 1 behind'));
+    assert.equal((await execFileAsync('git', ['-C', firstPath, 'rev-parse', 'HEAD'])).stdout.trim(), divergentHead);
+    await assert.rejects(execFileAsync('git', ['-C', firstPath, 'cat-file', '-e', 'HEAD:remote-three.txt']));
+
+    secondCard = findProject(document, 'second-project');
+    await findElement(secondCard, 'Edit').dispatch('click');
+    const editedCommand = `${command} --edited`;
+    document.elements.get('start-command').value = editedCommand;
+    await document.elements.get('project-form').dispatch('submit');
+    const second = projects.find(({ name }) => name === 'second-project');
+    assert.equal((await fetch(`${baseUrl}/api/projects/${second.id}`).then((response) => response.json())).startCommand, editedCommand);
+    assert.ok(findElement(findProject(document, 'second-project'), `Start: ${editedCommand}`));
+
+    await findElement(findProject(document, 'second-project'), 'Delete').dispatch('click');
+    assert.equal(await fetch(`${baseUrl}/api/projects/${second.id}`).then((response) => response.status), 404);
+    assert.equal(findProject(document, 'second-project'), undefined);
   } finally {
     await processManager.stopAll();
     if (server.listening) {
