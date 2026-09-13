@@ -55,6 +55,8 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
   let projects = [];
   let loadingProjects = false;
   let savingProject = false;
+  let savingProjectId = null;
+  let projectsRefreshRequired = false;
   const pendingProjects = new Set();
   const projectMessages = new Map();
   const branchStates = new Map();
@@ -68,7 +70,8 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
 
   function replaceProject(project) {
     const index = projects.findIndex(({ id }) => id === project.id);
-    if (index !== -1) projects[index] = project;
+    if (index === -1) projects.push(project);
+    else projects[index] = project;
   }
 
   function addMetadataRow(list, termText, detailText) {
@@ -175,17 +178,17 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
   }
 
   function render() {
-    const projectActionPending = pendingProjects.size > 0;
-    const mutationsBlocked = loadingProjects || savingProject || projectActionPending;
-    refreshButton.disabled = mutationsBlocked;
-    saveButton.disabled = mutationsBlocked;
+    refreshButton.disabled = loadingProjects || savingProject || pendingProjects.size > 0;
+    saveButton.disabled = loadingProjects || savingProject
+      || Boolean(idInput.value && pendingProjects.has(idInput.value));
     cancelButton.disabled = savingProject;
     if (!projects.length) {
       projectsElement.innerHTML = '<p class="empty">No projects registered yet.</p>';
       return;
     }
     projectsElement.replaceChildren(...projects.map((project) => {
-      const busy = mutationsBlocked;
+      const busy = loadingProjects || pendingProjects.has(project.id)
+        || savingProjectId === project.id;
       const article = documentObject.createElement('article');
       article.className = 'project';
       article.setAttribute('aria-busy', String(busy));
@@ -251,7 +254,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
   }
 
   async function performProjectAction(project, label, request, includeBranches) {
-    if (loadingProjects || savingProject || pendingProjects.size > 0) return;
+    if (loadingProjects || pendingProjects.has(project.id) || savingProjectId === project.id) return;
     pendingProjects.add(project.id);
     projectMessages.set(project.id, { text: `${label} in progress…`, error: false });
     render();
@@ -273,6 +276,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
     } finally {
       pendingProjects.delete(project.id);
       render();
+      await reconcileProjectsWhenIdle();
     }
   }
 
@@ -306,7 +310,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
   }
 
   async function refreshGit(project) {
-    if (loadingProjects || savingProject || pendingProjects.size > 0) return;
+    if (loadingProjects || pendingProjects.has(project.id) || savingProjectId === project.id) return;
     pendingProjects.add(project.id);
     projectMessages.set(project.id, { text: 'Refreshing Git state…', error: false });
     render();
@@ -318,11 +322,12 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
     } finally {
       pendingProjects.delete(project.id);
       render();
+      await reconcileProjectsWhenIdle();
     }
   }
 
-  async function loadProjects(clearMessage = true, reconcileMutation = false) {
-    if (loadingProjects || (!reconcileMutation && (savingProject || pendingProjects.size > 0))) return;
+  async function loadProjects(clearMessage = true) {
+    if (loadingProjects || savingProject || pendingProjects.size > 0) return;
     loadingProjects = true;
     if (clearMessage) message.textContent = '';
     render();
@@ -343,7 +348,14 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
     }
   }
 
+  async function reconcileProjectsWhenIdle() {
+    if (!projectsRefreshRequired || loadingProjects || savingProject || pendingProjects.size > 0) return;
+    projectsRefreshRequired = false;
+    await loadProjects(false);
+  }
+
   function editProject(project) {
+    if (loadingProjects || pendingProjects.has(project.id) || savingProjectId === project.id) return;
     idInput.value = project.id;
     pathInput.value = project.path;
     commandInput.value = project.startCommand;
@@ -360,7 +372,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
   }
 
   async function deleteProject(project) {
-    if (loadingProjects || savingProject || pendingProjects.size > 0
+    if (loadingProjects || pendingProjects.has(project.id) || savingProjectId === project.id
       || !confirmImpl(`Delete ${project.name}?`)) return;
     pendingProjects.add(project.id);
     projectMessages.set(project.id, { text: 'Delete in progress…', error: false });
@@ -371,36 +383,41 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
       projects = projects.filter(({ id }) => id !== project.id);
       branchStates.delete(project.id);
       projectMessages.delete(project.id);
-      await loadProjects(false, true);
+      projectsRefreshRequired = true;
     } catch (error) {
       projectMessages.set(project.id, { text: actionError('Delete', error), error: true });
     } finally {
       pendingProjects.delete(project.id);
       render();
+      await reconcileProjectsWhenIdle();
     }
   }
 
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
-    if (loadingProjects || savingProject || pendingProjects.size > 0) return;
+    const id = idInput.value;
+    if (loadingProjects || savingProject || (id && pendingProjects.has(id))) return;
     savingProject = true;
+    savingProjectId = id || null;
     message.textContent = 'Saving project…';
     render();
-    const id = idInput.value;
     try {
-      await requestJson(id ? `/api/projects/${encodeURIComponent(id)}` : '/api/projects', {
+      const saved = await requestJson(id ? `/api/projects/${encodeURIComponent(id)}` : '/api/projects', {
         method: id ? 'PUT' : 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ path: pathInput.value, startCommand: commandInput.value }),
       }, fetchImpl);
+      replaceProject(saved);
       resetForm();
       message.textContent = 'Project saved.';
-      await loadProjects(false, true);
+      projectsRefreshRequired = true;
     } catch (error) {
       message.textContent = actionError('Save', error);
     } finally {
       savingProject = false;
+      savingProjectId = null;
       render();
+      await reconcileProjectsWhenIdle();
     }
   });
 

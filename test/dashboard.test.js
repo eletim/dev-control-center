@@ -200,3 +200,74 @@ test('a deferred full refresh blocks save, delete, lifecycle, and Git submission
   await refreshRun;
   assert.equal(findElement(projects, 'Running').textContent, 'Running');
 });
+
+test('pending actions block duplicates only for the affected project', async () => {
+  const document = createTestDocument();
+  const firstActionResponse = deferred();
+  const makeProject = (id, name) => ({
+    id,
+    name,
+    path: `/projects/${name}`,
+    startCommand: 'npm start',
+    status: 'stopped',
+    git: {
+      isRepository: true,
+      branch: 'main',
+      clean: true,
+      remote: 'origin/main',
+      ahead: 0,
+      behind: 0,
+    },
+  });
+  const first = makeProject('project-1', 'first');
+  const second = makeProject('project-2', 'second');
+  const requests = [];
+  const fetchImpl = (url, options = {}) => {
+    const method = options.method ?? 'GET';
+    requests.push(`${method} ${url}`);
+    if (url === '/api/projects') return Promise.resolve(jsonResponse([first, second]));
+    if (url.endsWith('/git/branches')) {
+      return Promise.resolve(jsonResponse({ branches: ['main', 'topic'] }));
+    }
+    if (method === 'POST' && url === '/api/projects/project-1/start') {
+      return firstActionResponse.promise;
+    }
+    if (url.includes('/project-1')) {
+      return Promise.resolve(jsonResponse({ ...first, status: 'running' }));
+    }
+    return Promise.resolve(jsonResponse(second));
+  };
+  const dashboard = initDashboard(document, fetchImpl, () => true);
+  await dashboard.ready;
+
+  const projects = document.elements.get('projects');
+  const firstStart = findElement(projects.children[0], 'Start');
+  const firstAction = firstStart.dispatch('click');
+  const firstCard = projects.children[0];
+  const secondCard = projects.children[1];
+
+  assert.equal(findElement(firstCard, 'Start').disabled, true);
+  assert.equal(findElement(firstCard, 'Delete').disabled, true);
+  assert.equal(findElement(firstCard, 'Fetch').disabled, true);
+  assert.equal(findElement(secondCard, 'Start').disabled, false);
+  assert.equal(findElement(secondCard, 'Edit').disabled, false);
+  assert.equal(findElement(secondCard, 'Delete').disabled, false);
+  assert.equal(findElement(secondCard, 'Fetch').disabled, false);
+  assert.equal(document.elements.get('save-project').disabled, false);
+  assert.equal(document.elements.get('refresh').disabled, true);
+
+  await Promise.all([
+    firstStart.dispatch('click'),
+    findElement(firstCard, 'Fetch').dispatch('click'),
+    findElement(secondCard, 'Fetch').dispatch('click'),
+  ]);
+  assert.equal(requests.filter((request) => request === 'POST /api/projects/project-1/start').length, 1);
+  assert.equal(requests.includes('POST /api/projects/project-1/git/fetch'), false);
+  assert.equal(requests.filter((request) => request === 'POST /api/projects/project-2/git/fetch').length, 1);
+  assert.equal(findElement(projects.children[1], 'Fetch').disabled, false);
+
+  firstActionResponse.resolve(jsonResponse({ ...first, status: 'running' }));
+  await firstAction;
+  assert.equal(findElement(projects.children[0], 'Running').textContent, 'Running');
+  assert.equal(document.elements.get('refresh').disabled, false);
+});
