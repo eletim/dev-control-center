@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, unlink, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, mkdtemp, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';
-import { fetchRepository, listBranches, switchBranch, updateRepository } from '../src/git-actions.js';
+import {
+  fetchRepository, GitActionManager, listBranches, switchBranch, updateRepository,
+} from '../src/git-actions.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -46,6 +48,20 @@ async function createRemotePair() {
   await git(checkout, 'config', 'user.name', 'Dev Control Center Test');
   await git(checkout, 'config', 'user.email', 'test@example.invalid');
   return { source, checkout };
+}
+
+async function waitForFile(filePath) {
+  const deadline = Date.now() + 3000;
+  while (Date.now() < deadline) {
+    try {
+      await access(filePath);
+      return;
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out waiting for ${filePath}`);
 }
 
 test('discovers and switches only existing local branches from a clean worktree', async () => {
@@ -96,4 +112,53 @@ test('refuses updates with local changes and actions outside a worktree reposito
   await assert.rejects(fetchRepository(directory), { code: 'not_repository' });
   await assert.rejects(updateRepository(directory), { code: 'not_repository' });
   await assert.rejects(switchBranch(directory, 'main'), { code: 'not_repository' });
+});
+
+test('refuses an update when HEAD changes during fetch even with the same upstream', async () => {
+  const { checkout } = await createRemotePair();
+  await git(checkout, 'branch', '--track', 'other', 'origin/main');
+  const marker = path.join(path.dirname(checkout), 'fetch-started');
+  const release = path.join(path.dirname(checkout), 'release-fetch');
+  const uploadPack = path.join(path.dirname(checkout), 'delayed-upload-pack.sh');
+  await writeFile(uploadPack, [
+    '#!/bin/sh',
+    `: > ${JSON.stringify(marker)}`,
+    `while [ ! -e ${JSON.stringify(release)} ]; do sleep 0.01; done`,
+    'exec git-upload-pack "$@"',
+    '',
+  ].join('\n'));
+  await chmod(uploadPack, 0o755);
+  await git(checkout, 'config', 'remote.origin.uploadpack', uploadPack);
+
+  const update = updateRepository(checkout);
+  await waitForFile(marker);
+  await git(checkout, 'switch', 'other');
+  await writeFile(release, 'continue\n');
+
+  await assert.rejects(update, { code: 'git_state_changed' });
+  assert.equal(await git(checkout, 'branch', '--show-current'), 'other');
+});
+
+test('serializes nested project paths by canonical Git repository identity', async () => {
+  const repository = await createRepository();
+  const nestedPath = path.join(repository, 'packages', 'nested');
+  await mkdir(nestedPath, { recursive: true });
+  const manager = new GitActionManager();
+  let releaseFirst;
+  let firstStarted;
+  const started = new Promise((resolve) => { firstStarted = resolve; });
+  const first = manager.withRepositoryLock(repository, async () => {
+    firstStarted();
+    await new Promise((resolve) => { releaseFirst = resolve; });
+  });
+  await started;
+
+  let secondStarted = false;
+  const second = manager.withRepositoryLock(nestedPath, async () => { secondStarted = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(secondStarted, false);
+
+  releaseFirst();
+  await Promise.all([first, second]);
+  assert.equal(secondStarted, true);
 });

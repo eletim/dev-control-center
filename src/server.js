@@ -2,7 +2,9 @@ import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { fetchRepository, listBranches, switchBranch, updateRepository } from './git-actions.js';
+import {
+  fetchRepository, GitActionManager, listBranches, switchBranch, updateRepository,
+} from './git-actions.js';
 import { getGitMetadata } from './git-metadata.js';
 import { ProjectProcessManager } from './project-process-manager.js';
 import { ProjectError } from './project-store.js';
@@ -43,7 +45,11 @@ async function present(project, processManager) {
   };
 }
 
-export function createAppServer(store, processManager = new ProjectProcessManager()) {
+export function createAppServer(
+  store,
+  processManager = new ProjectProcessManager(),
+  gitActionManager = new GitActionManager(),
+) {
   return createServer(async (request, response) => {
     try {
       const url = new URL(request.url, 'http://localhost');
@@ -83,9 +89,11 @@ export function createAppServer(store, processManager = new ProjectProcessManage
           const project = await processManager.withProjectLock(id, async () => {
             const currentProject = await store.get(id);
             if (!currentProject) throw new ProjectError('not_found', 'Project not found.');
-            if (action === 'fetch') await fetchRepository(currentProject.path);
-            else if (action === 'update') await updateRepository(currentProject.path);
-            else await switchBranch(currentProject.path, input?.branch);
+            await gitActionManager.withRepositoryLock(currentProject.path, async () => {
+              if (action === 'fetch') await fetchRepository(currentProject.path);
+              else if (action === 'update') await updateRepository(currentProject.path);
+              else await switchBranch(currentProject.path, input?.branch);
+            });
             return currentProject;
           });
           sendJson(response, 200, await present(project, processManager));

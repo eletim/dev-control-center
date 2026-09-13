@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { realpath } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { ProjectError } from './project-store.js';
 
@@ -40,6 +41,37 @@ async function requireClean(repositoryPath) {
   }
 }
 
+async function repositoryIdentity(repositoryPath) {
+  await requireRepository(repositoryPath);
+  try {
+    const commonDirectory = await git(repositoryPath, [
+      'rev-parse', '--path-format=absolute', '--git-common-dir',
+    ]);
+    return await realpath(commonDirectory);
+  } catch {
+    throw new ProjectError('not_repository', 'Project path is not a Git repository.');
+  }
+}
+
+export class GitActionManager {
+  constructor() {
+    this.queues = new Map();
+  }
+
+  async withRepositoryLock(repositoryPath, operation) {
+    const identity = await repositoryIdentity(repositoryPath);
+    const previous = this.queues.get(identity) ?? Promise.resolve();
+    const result = previous.catch(() => {}).then(operation);
+    const tail = result.catch(() => {});
+    this.queues.set(identity, tail);
+    try {
+      return await result;
+    } finally {
+      if (this.queues.get(identity) === tail) this.queues.delete(identity);
+    }
+  }
+}
+
 export async function listBranches(repositoryPath) {
   await requireRepository(repositoryPath);
   const output = await git(repositoryPath, [
@@ -64,8 +96,10 @@ export async function updateRepository(repositoryPath) {
   await requireRepository(repositoryPath);
   await requireClean(repositoryPath);
 
+  let branch;
   let upstream;
   try {
+    branch = await git(repositoryPath, ['symbolic-ref', '--quiet', 'HEAD']);
     upstream = await git(repositoryPath, ['rev-parse', '--symbolic-full-name', '@{upstream}']);
   } catch {
     throw new ProjectError('no_upstream', 'Current branch has no configured upstream.');
@@ -80,13 +114,15 @@ export async function updateRepository(repositoryPath) {
   // Fetch can take time, so verify mutable preconditions again before updating HEAD.
   await requireRepository(repositoryPath);
   await requireClean(repositoryPath);
+  let currentBranch;
   let currentUpstream;
   try {
+    currentBranch = await git(repositoryPath, ['symbolic-ref', '--quiet', 'HEAD']);
     currentUpstream = await git(repositoryPath, ['rev-parse', '--symbolic-full-name', '@{upstream}']);
   } catch {
     throw new ProjectError('no_upstream', 'Current branch has no configured upstream.');
   }
-  if (currentUpstream !== upstream) {
+  if (currentBranch !== branch || currentUpstream !== upstream) {
     throw new ProjectError('git_state_changed', 'Git branch or upstream changed while updating.');
   }
 
