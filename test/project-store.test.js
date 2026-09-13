@@ -42,3 +42,54 @@ test('rejects missing paths, blank commands, and canonical duplicates', async ()
   await symlink(projectPath, linkedPath);
   await assert.rejects(store.create({ path: linkedPath, startCommand: 'other' }), { code: 'duplicate_path' });
 });
+
+test('serializes a concurrent update and delete without duplicating records', async () => {
+  const { directory, projectPath, dataFile } = await fixture();
+  const secondPath = path.join(directory, 'second-project');
+  await mkdir(secondPath);
+  const store = new ProjectStore(dataFile);
+  const first = await store.create({ path: projectPath, startCommand: 'first' });
+  const second = await store.create({ path: secondPath, startCommand: 'second' });
+
+  await Promise.all([
+    store.update(second.id, { path: secondPath, startCommand: 'updated' }),
+    store.delete(first.id),
+  ]);
+
+  const expected = [{ ...second, startCommand: 'updated' }];
+  assert.deepEqual(await store.list(), expected);
+  assert.deepEqual(await new ProjectStore(dataFile).list(), expected);
+});
+
+test('failed writes do not publish state and do not prevent later writes', async () => {
+  const { directory, projectPath, dataFile } = await fixture();
+  const store = new ProjectStore(dataFile);
+  const workingFile = store.filePath;
+
+  store.filePath = directory;
+  await assert.rejects(store.create({ path: projectPath, startCommand: 'first' }));
+  assert.deepEqual(await store.list(), []);
+
+  store.filePath = workingFile;
+  const created = await store.create({ path: projectPath, startCommand: 'first' });
+  assert.deepEqual(await new ProjectStore(dataFile).list(), [created]);
+
+  store.filePath = directory;
+  await assert.rejects(store.update(created.id, { path: projectPath, startCommand: 'failed update' }));
+  assert.deepEqual(await store.list(), [created]);
+  assert.deepEqual(await new ProjectStore(dataFile).list(), [created]);
+
+  store.filePath = workingFile;
+  const updated = await store.update(created.id, { path: projectPath, startCommand: 'updated' });
+  assert.deepEqual(await new ProjectStore(dataFile).list(), [updated]);
+
+  store.filePath = directory;
+  await assert.rejects(store.delete(created.id));
+  assert.deepEqual(await store.list(), [updated]);
+  assert.deepEqual(await new ProjectStore(dataFile).list(), [updated]);
+
+  store.filePath = workingFile;
+  await store.delete(created.id);
+  assert.deepEqual(await store.list(), []);
+  assert.deepEqual(await new ProjectStore(dataFile).list(), []);
+});

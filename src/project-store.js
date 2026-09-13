@@ -14,7 +14,7 @@ export class ProjectStore {
     this.filePath = filePath;
     this.projects = [];
     this.ready = this.#load();
-    this.pendingWrite = Promise.resolve();
+    this.pendingMutation = Promise.resolve();
   }
 
   async #load() {
@@ -41,33 +41,33 @@ export class ProjectStore {
   }
 
   async create(input) {
-    await this.ready;
-    const project = await this.#validatedProject(input);
-    this.#ensureUniquePath(project.path);
-    const saved = { id: randomUUID(), ...project };
-    this.projects.push(saved);
-    await this.#save();
-    return { ...saved };
+    return this.#mutate(async (projects) => {
+      const project = await this.#validatedProject(input);
+      this.#ensureUniquePath(projects, project.path);
+      const saved = { id: randomUUID(), ...project };
+      return { projects: [...projects, saved], result: { ...saved } };
+    });
   }
 
   async update(id, input) {
-    await this.ready;
-    const index = this.projects.findIndex((project) => project.id === id);
-    if (index === -1) throw new ProjectError('not_found', 'Project not found.');
-    const project = await this.#validatedProject(input);
-    this.#ensureUniquePath(project.path, id);
-    const saved = { id, ...project };
-    this.projects[index] = saved;
-    await this.#save();
-    return { ...saved };
+    return this.#mutate(async (projects) => {
+      const index = projects.findIndex((project) => project.id === id);
+      if (index === -1) throw new ProjectError('not_found', 'Project not found.');
+      const project = await this.#validatedProject(input);
+      this.#ensureUniquePath(projects, project.path, id);
+      const saved = { id, ...project };
+      const nextProjects = [...projects];
+      nextProjects[index] = saved;
+      return { projects: nextProjects, result: { ...saved } };
+    });
   }
 
   async delete(id) {
-    await this.ready;
-    const index = this.projects.findIndex((project) => project.id === id);
-    if (index === -1) throw new ProjectError('not_found', 'Project not found.');
-    this.projects.splice(index, 1);
-    await this.#save();
+    return this.#mutate(async (projects) => {
+      const index = projects.findIndex((project) => project.id === id);
+      if (index === -1) throw new ProjectError('not_found', 'Project not found.');
+      return { projects: projects.filter((project) => project.id !== id) };
+    });
   }
 
   async #validatedProject(input) {
@@ -92,19 +92,24 @@ export class ProjectStore {
     return { path: canonicalPath, startCommand: input.startCommand.trim() };
   }
 
-  #ensureUniquePath(canonicalPath, exceptId = null) {
-    if (this.projects.some((project) => project.path === canonicalPath && project.id !== exceptId)) {
+  #ensureUniquePath(projects, canonicalPath, exceptId = null) {
+    if (projects.some((project) => project.path === canonicalPath && project.id !== exceptId)) {
       throw new ProjectError('duplicate_path', 'That project path is already registered.');
     }
   }
 
-  async #save() {
-    this.pendingWrite = this.pendingWrite.then(async () => {
+  async #mutate(operation) {
+    const mutation = this.pendingMutation.then(async () => {
+      await this.ready;
+      const { projects, result } = await operation(this.projects);
       await mkdir(path.dirname(this.filePath), { recursive: true });
       const temporaryPath = `${this.filePath}.${process.pid}.tmp`;
-      await writeFile(temporaryPath, `${JSON.stringify(this.projects, null, 2)}\n`, 'utf8');
+      await writeFile(temporaryPath, `${JSON.stringify(projects, null, 2)}\n`, 'utf8');
       await rename(temporaryPath, this.filePath);
+      this.projects = projects;
+      return result;
     });
-    return this.pendingWrite;
+    this.pendingMutation = mutation.catch(() => {});
+    return mutation;
   }
 }
