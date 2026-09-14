@@ -212,6 +212,37 @@ test('multiple projects complete dashboard lifecycle and safe Git workflows over
       .then(({ stdout }) => stdout.trim()), '?? local-change.txt');
 
     await unlink(path.join(secondPath, 'local-change.txt'));
+    const topicWorktree = `${secondPath}-topic-worktree`;
+    await execFileAsync('git', ['-C', secondPath, 'worktree', 'add', '-q', topicWorktree, 'topic']);
+    await findElement(secondCard, 'Refresh Git').dispatch('click');
+    secondCard = findProject(document, 'second-project');
+    assert.ok(findElement(secondCard, topicWorktree));
+    assert.ok(findElement(secondCard, 'Remove Worktree'));
+
+    branchSelect = findTag(secondCard, 'select');
+    branchSelect.value = 'topic';
+    await branchSelect.dispatch('change');
+    await findElement(secondCard, 'Switch').dispatch('click');
+
+    await waitFor(() => {
+      secondCard = findProject(document, 'second-project');
+      return findElement(
+        secondCard,
+        `Branch switch refused: Branch is checked out in another worktree: ${topicWorktree}`,
+      ) && secondCard['aria-busy'] === 'false';
+    });
+    assert.ok(findElement(secondCard, topicWorktree));
+    assert.equal((await execFileAsync('git', ['-C', secondPath, 'branch', '--show-current'])).stdout.trim(), 'main');
+
+    await findElement(secondCard, 'Remove Worktree').dispatch('click');
+    secondCard = findProject(document, 'second-project');
+    assert.ok(findElement(secondCard, 'Remove worktree complete. Retry Branch Switch explicitly if needed.'));
+    assert.equal(findElement(secondCard, topicWorktree), null);
+    assert.ok(findElement(secondCard, secondPath));
+    assert.equal((await fetch(`${baseUrl}/api/projects/${projects.find(({ name }) => name === 'second-project').id}`)
+      .then((response) => response.json())).path, secondPath);
+    assert.equal((await execFileAsync('git', ['-C', secondPath, 'branch', '--show-current'])).stdout.trim(), 'main');
+
     branchSelect = findTag(secondCard, 'select');
     branchSelect.value = 'topic';
     await branchSelect.dispatch('change');
