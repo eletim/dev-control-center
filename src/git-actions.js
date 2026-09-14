@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
-import { realpath } from 'node:fs/promises';
+import { readdir, readFile, realpath } from 'node:fs/promises';
+import path from 'node:path';
 import { promisify } from 'node:util';
 import { ProjectError } from './project-store.js';
 
@@ -39,6 +40,134 @@ async function requireClean(repositoryPath) {
   if (await git(repositoryPath, ['status', '--porcelain'])) {
     throw new ProjectError('dirty_worktree', 'Git working tree must be clean.');
   }
+}
+
+function parseNulWorktrees(output) {
+  const worktrees = [];
+  let current = null;
+  const finishRecord = () => {
+    if (current) worktrees.push(current);
+    current = null;
+  };
+
+  for (const field of output.split('\0')) {
+    if (!field) {
+      finishRecord();
+      continue;
+    }
+    const separator = field.indexOf(' ');
+    const attribute = separator === -1 ? field : field.slice(0, separator);
+    const value = separator === -1 ? '' : field.slice(separator + 1);
+    if (attribute === 'worktree') {
+      finishRecord();
+      current = { path: value, branch: null };
+    } else if (attribute === 'branch' && current) {
+      current.branch = value.startsWith('refs/heads/')
+        ? value.slice('refs/heads/'.length)
+        : null;
+    }
+  }
+  finishRecord();
+  return worktrees;
+}
+
+function stripFinalNewline(value) {
+  return value.endsWith('\n') ? value.slice(0, -1) : value;
+}
+
+function branchFromHead(value) {
+  const head = stripFinalNewline(value);
+  const prefix = 'ref: refs/heads/';
+  return head.startsWith(prefix) ? head.slice(prefix.length) : null;
+}
+
+async function metadataWorktrees(repositoryPath) {
+  const commonDirectory = await repositoryIdentity(repositoryPath);
+  const currentGitDirectory = await realpath(await git(repositoryPath, [
+    'rev-parse', '--path-format=absolute', '--git-dir',
+  ]));
+  let mainPath;
+  let mainBranch;
+  if (currentGitDirectory === commonDirectory) {
+    mainPath = await worktreeRoot(repositoryPath);
+    mainBranch = branchFromHead(await readFile(path.join(commonDirectory, 'HEAD'), 'utf8'));
+  } else {
+    let configuredWorktree = null;
+    try {
+      configuredWorktree = await git(repositoryPath, [
+        'config', '-z', '--path', '--get', 'core.worktree',
+      ]);
+      if (configuredWorktree.endsWith('\0')) configuredWorktree = configuredWorktree.slice(0, -1);
+    } catch {
+      // Ordinary repositories infer their main worktree from the .git directory.
+    }
+    const isBare = await git(repositoryPath, [
+      `--git-dir=${commonDirectory}`, 'rev-parse', '--is-bare-repository',
+    ]) === 'true';
+    mainPath = configuredWorktree
+      ? path.resolve(commonDirectory, configuredWorktree)
+      : isBare ? commonDirectory : path.dirname(commonDirectory);
+    mainBranch = isBare
+      ? null
+      : branchFromHead(await readFile(path.join(commonDirectory, 'HEAD'), 'utf8'));
+  }
+
+  const worktrees = [{ path: mainPath, branch: mainBranch }];
+  let entries;
+  try {
+    entries = await readdir(path.join(commonDirectory, 'worktrees'), { withFileTypes: true });
+  } catch (error) {
+    if (error.code === 'ENOENT') return worktrees;
+    throw error;
+  }
+
+  for (const entry of entries.filter((candidate) => candidate.isDirectory())
+    .sort((left, right) => left.name.localeCompare(right.name))) {
+    const administrationPath = path.join(commonDirectory, 'worktrees', entry.name);
+    const gitFile = stripFinalNewline(await readFile(path.join(administrationPath, 'gitdir'), 'utf8'));
+    const head = await readFile(path.join(administrationPath, 'HEAD'), 'utf8');
+    worktrees.push({ path: path.dirname(gitFile), branch: branchFromHead(head) });
+  }
+  return worktrees;
+}
+
+async function worktreeRoot(repositoryPath) {
+  return realpath(await git(repositoryPath, [
+    'rev-parse', '--path-format=absolute', '--show-toplevel',
+  ]));
+}
+
+async function findRegisteredWorktree(worktrees, requestedPath) {
+  let canonicalPath;
+  try {
+    canonicalPath = await realpath(requestedPath);
+  } catch {
+    return null;
+  }
+
+  for (const worktree of worktrees) {
+    try {
+      if (await realpath(worktree.path) === canonicalPath) return { ...worktree, canonicalPath };
+    } catch {
+      // Missing, prunable worktrees cannot be safely removed through this operation.
+    }
+  }
+  return null;
+}
+
+async function conflictingWorktree(repositoryPath, branch) {
+  const currentPath = await worktreeRoot(repositoryPath);
+  const worktrees = await listWorktrees(repositoryPath);
+  for (const worktree of worktrees) {
+    if (worktree.branch !== branch) continue;
+    try {
+      if (await realpath(worktree.path) === currentPath) continue;
+    } catch {
+      // A registered but inaccessible worktree still prevents a safe branch switch.
+    }
+    return worktree;
+  }
+  return null;
 }
 
 async function repositoryIdentity(repositoryPath) {
@@ -81,6 +210,47 @@ export async function listBranches(repositoryPath) {
     'refs/heads',
   ]);
   return output ? output.split('\n') : [];
+}
+
+export async function listWorktrees(repositoryPath) {
+  await requireRepository(repositoryPath);
+  try {
+    const output = await git(repositoryPath, ['worktree', 'list', '--porcelain', '-z']);
+    return parseNulWorktrees(output);
+  } catch {
+    // Newline-delimited porcelain cannot represent every valid path unambiguously.
+    // Older Git versions are read through their per-worktree metadata instead.
+    return metadataWorktrees(repositoryPath);
+  }
+}
+
+export async function removeWorktree(repositoryPath, worktreePath) {
+  await requireRepository(repositoryPath);
+  if (typeof worktreePath !== 'string' || !worktreePath) {
+    throw new ProjectError('invalid_worktree', 'An existing worktree path is required.');
+  }
+
+  const registeredPath = await worktreeRoot(repositoryPath);
+  let worktree = await findRegisteredWorktree(await listWorktrees(repositoryPath), worktreePath);
+  if (!worktree) {
+    throw new ProjectError('invalid_worktree', 'An existing worktree path is required.');
+  }
+  if (worktree.canonicalPath === registeredPath) {
+    throw new ProjectError('registered_worktree', 'The registered project worktree cannot be removed.');
+  }
+  await requireClean(worktree.canonicalPath);
+
+  // Re-resolve the registration after checking cleanliness. Git performs its own
+  // final dirty-worktree check, and removal is deliberately never forced.
+  worktree = await findRegisteredWorktree(await listWorktrees(repositoryPath), worktree.canonicalPath);
+  if (!worktree || worktree.canonicalPath === registeredPath) {
+    throw new ProjectError('git_state_changed', 'Git worktree state changed before removal.');
+  }
+  try {
+    await git(repositoryPath, ['worktree', 'remove', worktree.path]);
+  } catch {
+    throw new ProjectError('worktree_remove_failed', 'Could not safely remove the Git worktree.');
+  }
 }
 
 export async function fetchRepository(repositoryPath) {
@@ -152,13 +322,35 @@ export async function switchBranch(repositoryPath, branch) {
     throw new ProjectError('invalid_branch', 'An existing local branch is required.');
   }
 
+  let conflict = await conflictingWorktree(repositoryPath, branch);
+  if (conflict) {
+    throw new ProjectError(
+      'branch_in_use',
+      `Branch is checked out in another worktree: ${conflict.path}`,
+    );
+  }
+
   // Branch validation can take time in a queued action; cleanliness is checked again
   // immediately before switching so local changes are never carried across branches.
   await requireRepository(repositoryPath);
   await requireClean(repositoryPath);
+  conflict = await conflictingWorktree(repositoryPath, branch);
+  if (conflict) {
+    throw new ProjectError(
+      'branch_in_use',
+      `Branch is checked out in another worktree: ${conflict.path}`,
+    );
+  }
   try {
     await git(repositoryPath, ['switch', '--no-guess', branch]);
   } catch {
+    conflict = await conflictingWorktree(repositoryPath, branch);
+    if (conflict) {
+      throw new ProjectError(
+        'branch_in_use',
+        `Branch is checked out in another worktree: ${conflict.path}`,
+      );
+    }
     throw new ProjectError('switch_failed', 'Could not switch Git branches.');
   }
 }

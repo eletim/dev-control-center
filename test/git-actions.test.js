@@ -6,7 +6,8 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';
 import {
-  fetchRepository, GitActionManager, listBranches, switchBranch, updateRepository,
+  fetchRepository, GitActionManager, listBranches, listWorktrees, removeWorktree,
+  switchBranch, updateRepository,
 } from '../src/git-actions.js';
 
 const execFileAsync = promisify(execFile);
@@ -78,6 +79,117 @@ test('discovers and switches only existing local branches from a clean worktree'
   await unlink(path.join(repository, 'untracked.txt'));
   await assert.rejects(switchBranch(repository, '--detach'), { code: 'invalid_branch' });
   await assert.rejects(switchBranch(repository, 'missing'), { code: 'invalid_branch' });
+});
+
+test('discovers worktrees when legacy porcelain paths contain attribute-like lines', async () => {
+  const repository = await createRepository();
+  const continuations = [
+    'HEAD path-fragment',
+    'branch path-fragment',
+    'worktree path-fragment',
+    'bare path-fragment',
+    'detached path-fragment',
+  ];
+  const expected = [{ path: repository, branch: 'main' }];
+  for (const [index, continuation] of continuations.entries()) {
+    const branch = `topic-${index}`;
+    const worktreePath = `${repository}-${index}\n${continuation}`;
+    await git(repository, 'branch', branch);
+    await git(repository, 'worktree', 'add', worktreePath, branch);
+    expected.push({ path: worktreePath, branch });
+  }
+
+  assert.deepEqual(
+    (await listWorktrees(repository)).sort((left, right) => left.path.localeCompare(right.path)),
+    expected.sort((left, right) => left.path.localeCompare(right.path)),
+  );
+
+  await git(expected.at(-1).path, 'switch', '--detach');
+  assert.equal(
+    (await listWorktrees(repository)).find(({ path: worktreePath }) => worktreePath === expected.at(-1).path).branch,
+    null,
+  );
+});
+
+test('manages worktrees from a linked checkout when core.bare is unset', async () => {
+  const repository = await createRepository();
+  const registeredWorktree = `${repository}-registered`;
+  const removableWorktree = `${repository}-removable`;
+  await git(repository, 'branch', 'registered');
+  await git(repository, 'branch', 'topic');
+  await git(repository, 'worktree', 'add', registeredWorktree, 'registered');
+  await git(repository, 'worktree', 'add', removableWorktree, 'topic');
+  await git(repository, 'config', '--unset', 'core.bare');
+
+  assert.deepEqual(await listWorktrees(registeredWorktree), [
+    { path: repository, branch: 'main' },
+    { path: registeredWorktree, branch: 'registered' },
+    { path: removableWorktree, branch: 'topic' },
+  ]);
+  await assert.rejects(
+    switchBranch(registeredWorktree, 'topic'),
+    (error) => error.code === 'branch_in_use' && error.message.includes(removableWorktree),
+  );
+  await removeWorktree(registeredWorktree, removableWorktree);
+  await assert.rejects(access(removableWorktree), { code: 'ENOENT' });
+  await assert.rejects(
+    removeWorktree(registeredWorktree, registeredWorktree),
+    { code: 'registered_worktree' },
+  );
+});
+
+test('does not treat a bare main repository as a branch-bearing worktree', async () => {
+  const source = await createRepository();
+  const bareRepository = `${source}.git`;
+  const linkedWorktree = `${source}-linked`;
+  await execFileAsync('git', ['clone', '-q', '--bare', source, bareRepository]);
+  await execFileAsync('git', ['--git-dir', bareRepository, 'branch', 'linked']);
+  await execFileAsync('git', [
+    '--git-dir', bareRepository, 'worktree', 'add', '-q', linkedWorktree, 'linked',
+  ]);
+
+  assert.deepEqual(await listWorktrees(linkedWorktree), [
+    { path: bareRepository, branch: null },
+    { path: linkedWorktree, branch: 'linked' },
+  ]);
+  await switchBranch(linkedWorktree, 'main');
+  assert.equal(await git(linkedWorktree, 'branch', '--show-current'), 'main');
+});
+
+test('refuses a branch checked out elsewhere and reports its worktree without removing it', async () => {
+  const repository = await createRepository();
+  const topicWorktree = `${repository}-topic\nHEAD path-fragment`;
+  await git(repository, 'branch', 'topic');
+  await git(repository, 'worktree', 'add', topicWorktree, 'topic');
+
+  await assert.rejects(
+    switchBranch(repository, 'topic'),
+    (error) => error.code === 'branch_in_use' && error.message.includes(topicWorktree),
+  );
+  assert.equal(await git(repository, 'branch', '--show-current'), 'main');
+  assert.equal(await git(topicWorktree, 'branch', '--show-current'), 'topic');
+});
+
+test('removes only an explicitly selected clean non-project worktree', async () => {
+  const repository = await createRepository();
+  const topicWorktree = `${repository}-topic\nbranch path-fragment`;
+  await git(repository, 'branch', 'topic');
+  await git(repository, 'worktree', 'add', topicWorktree, 'topic');
+
+  await assert.rejects(removeWorktree(repository, repository), { code: 'registered_worktree' });
+  assert.equal(await git(repository, 'branch', '--show-current'), 'main');
+
+  await writeFile(path.join(topicWorktree, 'untracked.txt'), 'local work\n');
+  await assert.rejects(removeWorktree(repository, topicWorktree), { code: 'dirty_worktree' });
+  assert.equal(await git(topicWorktree, 'branch', '--show-current'), 'topic');
+  await unlink(path.join(topicWorktree, 'untracked.txt'));
+
+  const unregistered = await mkdtemp(path.join(os.tmpdir(), 'dcc-not-worktree-'));
+  await assert.rejects(removeWorktree(repository, unregistered), { code: 'invalid_worktree' });
+
+  await removeWorktree(repository, topicWorktree);
+  await assert.rejects(access(topicWorktree), { code: 'ENOENT' });
+  assert.deepEqual(await listWorktrees(repository), [{ path: repository, branch: 'main' }]);
 });
 
 test('fetches remotes and updates only by fast-forwarding the configured upstream', async () => {
