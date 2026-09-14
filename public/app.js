@@ -309,17 +309,28 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
     if (includeBranches && refreshed.git?.isRepository) await loadGitDetails(refreshed);
   }
 
-  function refreshRepositoryProjects(project) {
+  function projectsSharingRepository(project) {
     const identity = project.git?.repositoryIdentity;
-    const relatedProjects = identity
+    return identity
       ? projects.filter((candidate) => candidate.git?.repositoryIdentity === identity)
       : [project];
-    return Promise.all(relatedProjects.map((candidate) => refreshProject(candidate, true)));
+  }
+
+  function refreshRepositoryProjects(relatedProjects) {
+    return Promise.all(relatedProjects
+      .map((candidate) => refreshProject(candidate, true)));
+  }
+
+  function projectsAreBusy(candidates) {
+    return loadingProjects || candidates.some(({ id }) => (
+      pendingProjects.has(id) || savingProjectId === id
+    ));
   }
 
   async function performProjectAction(project, label, request, includeBranches) {
-    if (loadingProjects || pendingProjects.has(project.id) || savingProjectId === project.id) return;
-    pendingProjects.add(project.id);
+    const affectedProjects = includeBranches ? projectsSharingRepository(project) : [project];
+    if (projectsAreBusy(affectedProjects)) return;
+    for (const { id } of affectedProjects) pendingProjects.add(id);
     projectMessages.set(project.id, { text: `${label} in progress…`, error: false });
     render();
     try {
@@ -330,7 +341,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
       projectMessages.set(project.id, { text: actionError(label, error), error: true });
     }
     try {
-      if (includeBranches) await refreshRepositoryProjects(project);
+      if (includeBranches) await refreshRepositoryProjects(affectedProjects);
       else await refreshProject(project, false);
     } catch (error) {
       const existing = projectMessages.get(project.id);
@@ -339,7 +350,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
         error: true,
       });
     } finally {
-      pendingProjects.delete(project.id);
+      for (const { id } of affectedProjects) pendingProjects.delete(id);
       render();
       await reconcileProjectsWhenIdle();
     }
@@ -375,9 +386,10 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
   }
 
   async function removeProjectWorktree(project, worktree) {
-    if (loadingProjects || pendingProjects.has(project.id) || savingProjectId === project.id
+    const affectedProjects = projectsSharingRepository(project);
+    if (projectsAreBusy(affectedProjects)
       || !confirmImpl(`Remove worktree at ${worktree.path} (${worktree.branch || 'Detached'})? Branch Switch will not run automatically.`)) return;
-    pendingProjects.add(project.id);
+    for (const { id } of affectedProjects) pendingProjects.add(id);
     projectMessages.set(project.id, { text: 'Remove worktree in progress…', error: false });
     render();
     try {
@@ -394,7 +406,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
       projectMessages.set(project.id, { text: actionError('Remove worktree', error), error: true });
     }
     try {
-      await refreshRepositoryProjects(project);
+      await refreshRepositoryProjects(affectedProjects);
     } catch (error) {
       const existing = projectMessages.get(project.id);
       projectMessages.set(project.id, {
@@ -402,24 +414,25 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
         error: true,
       });
     } finally {
-      pendingProjects.delete(project.id);
+      for (const { id } of affectedProjects) pendingProjects.delete(id);
       render();
       await reconcileProjectsWhenIdle();
     }
   }
 
   async function refreshGit(project) {
-    if (loadingProjects || pendingProjects.has(project.id) || savingProjectId === project.id) return;
-    pendingProjects.add(project.id);
+    const affectedProjects = projectsSharingRepository(project);
+    if (projectsAreBusy(affectedProjects)) return;
+    for (const { id } of affectedProjects) pendingProjects.add(id);
     projectMessages.set(project.id, { text: 'Refreshing Git state…', error: false });
     render();
     try {
-      await refreshRepositoryProjects(project);
+      await refreshRepositoryProjects(affectedProjects);
       projectMessages.set(project.id, { text: 'Git state refreshed.', error: false });
     } catch (error) {
       projectMessages.set(project.id, { text: actionError('Git refresh', error), error: true });
     } finally {
-      pendingProjects.delete(project.id);
+      for (const { id } of affectedProjects) pendingProjects.delete(id);
       render();
       await reconcileProjectsWhenIdle();
     }
