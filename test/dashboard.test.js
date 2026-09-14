@@ -84,10 +84,36 @@ function findElements(root, text) {
   return matches;
 }
 
+function findTag(root, tagName) {
+  if (root.tagName === tagName.toUpperCase()) return root;
+  for (const child of root.children) {
+    const match = findTag(child, tagName);
+    if (match) return match;
+  }
+  return null;
+}
+
+function findWorktreeRow(root, worktreePath) {
+  if (root.className === 'worktree-row' && findElement(root, worktreePath)) return root;
+  for (const child of root.children) {
+    const match = findWorktreeRow(child, worktreePath);
+    if (match) return match;
+  }
+  return null;
+}
+
 function deferred() {
   let resolve;
   const promise = new Promise((resolvePromise) => { resolve = resolvePromise; });
   return { promise, resolve };
+}
+
+async function waitFor(predicate, timeout = 2000) {
+  const deadline = Date.now() + timeout;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('Timed out waiting for dashboard state.');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }
 
 function jsonResponse(body, status = 200) {
@@ -364,4 +390,100 @@ test('lists worktrees and removes one only after confirmation before refreshing 
   assert.equal(requests.filter(({ url }) => url.endsWith('/git/branches')).length, 2);
   assert.equal(requests.filter(({ url, method }) => method === 'GET' && url.endsWith('/git/worktrees')).length, 2);
   assert.equal(requests.some(({ url }) => url.includes('/git/switch')), false);
+});
+
+test('Git actions and worktree removal refresh every project from the same repository', async () => {
+  const document = createTestDocument();
+  const identity = '/projects/demo/.git';
+  const mainPath = '/projects/demo';
+  const linkedPath = '/projects/demo-linked';
+  const removablePath = '/projects/demo-removable';
+  let mainBranch = 'main';
+  let removableExists = true;
+  const makeProject = (id, name, projectPath, branch, repositoryIdentity = identity) => ({
+    id,
+    name,
+    path: projectPath,
+    startCommand: 'npm start',
+    status: 'stopped',
+    git: {
+      isRepository: true,
+      repositoryIdentity,
+      branch,
+      clean: true,
+      remote: null,
+      ahead: null,
+      behind: null,
+    },
+  });
+  const currentProjects = () => [
+    makeProject('main', 'demo', mainPath, mainBranch),
+    makeProject('linked', 'demo-linked', linkedPath, 'linked'),
+    makeProject('unrelated', 'unrelated', '/projects/unrelated', 'main', '/projects/unrelated/.git'),
+  ];
+  const requests = [];
+  const fetchImpl = (url, options = {}) => {
+    const method = options.method ?? 'GET';
+    requests.push(`${method} ${url}`);
+    if (url === '/api/projects') return Promise.resolve(jsonResponse(currentProjects()));
+    if (method === 'POST' && url === '/api/projects/main/git/switch') {
+      mainBranch = 'topic';
+      return Promise.resolve(jsonResponse(currentProjects()[0]));
+    }
+    if (method === 'DELETE' && url === '/api/projects/main/git/worktrees') {
+      removableExists = false;
+      return Promise.resolve(jsonResponse(null, 204));
+    }
+    if (url.endsWith('/git/branches')) {
+      return Promise.resolve(jsonResponse({ branches: ['linked', 'main', 'topic'] }));
+    }
+    if (url.endsWith('/git/worktrees')) {
+      return Promise.resolve(jsonResponse({
+        worktrees: url.includes('/unrelated')
+          ? [{ path: '/projects/unrelated', branch: 'main' }]
+          : [
+            { path: mainPath, branch: mainBranch },
+            { path: linkedPath, branch: 'linked' },
+            ...(removableExists ? [{ path: removablePath, branch: 'removable' }] : []),
+          ],
+      }));
+    }
+    const id = url.split('/').at(-1);
+    return Promise.resolve(jsonResponse(currentProjects().find((project) => project.id === id)));
+  };
+
+  const dashboard = initDashboard(document, fetchImpl, () => true);
+  await dashboard.ready;
+  const projects = document.elements.get('projects');
+  let mainCard = projects.children[0];
+  let linkedCard = projects.children[1];
+  const unrelatedRefreshesBefore = requests.filter((request) => request.includes('/unrelated')).length;
+
+  const select = findTag(mainCard, 'select');
+  select.value = 'topic';
+  await select.dispatch('change');
+  await findElement(mainCard, 'Switch').dispatch('click');
+
+  await waitFor(() => {
+    mainCard = projects.children[0];
+    return findElement(mainCard, 'Branch switch complete.');
+  });
+  mainCard = projects.children[0];
+  linkedCard = projects.children[1];
+  assert.ok(findElement(mainCard, 'Branch switch complete.'));
+  assert.ok(findElement(findWorktreeRow(linkedCard, mainPath), 'topic'));
+  assert.equal(requests.filter((request) => request === 'GET /api/projects/main').length, 1);
+  assert.equal(requests.filter((request) => request === 'GET /api/projects/linked').length, 1);
+  assert.equal(requests.filter((request) => request.includes('/unrelated')).length, unrelatedRefreshesBefore);
+
+  const removableButton = findElements(mainCard, 'Remove Worktree').at(-1);
+  await removableButton.dispatch('click');
+
+  mainCard = projects.children[0];
+  linkedCard = projects.children[1];
+  assert.equal(findElement(mainCard, removablePath), null);
+  assert.equal(findElement(linkedCard, removablePath), null);
+  assert.equal(requests.filter((request) => request === 'GET /api/projects/main').length, 2);
+  assert.equal(requests.filter((request) => request === 'GET /api/projects/linked').length, 2);
+  assert.equal(requests.filter((request) => request.includes('/unrelated')).length, unrelatedRefreshesBefore);
 });

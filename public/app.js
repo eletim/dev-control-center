@@ -309,6 +309,14 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
     if (includeBranches && refreshed.git?.isRepository) await loadGitDetails(refreshed);
   }
 
+  function refreshRepositoryProjects(project) {
+    const identity = project.git?.repositoryIdentity;
+    const relatedProjects = identity
+      ? projects.filter((candidate) => candidate.git?.repositoryIdentity === identity)
+      : [project];
+    return Promise.all(relatedProjects.map((candidate) => refreshProject(candidate, true)));
+  }
+
   async function performProjectAction(project, label, request, includeBranches) {
     if (loadingProjects || pendingProjects.has(project.id) || savingProjectId === project.id) return;
     pendingProjects.add(project.id);
@@ -322,7 +330,8 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
       projectMessages.set(project.id, { text: actionError(label, error), error: true });
     }
     try {
-      await refreshProject(project, includeBranches);
+      if (includeBranches) await refreshRepositoryProjects(project);
+      else await refreshProject(project, false);
     } catch (error) {
       const existing = projectMessages.get(project.id);
       projectMessages.set(project.id, {
@@ -385,7 +394,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
       projectMessages.set(project.id, { text: actionError('Remove worktree', error), error: true });
     }
     try {
-      await refreshProject(project, true);
+      await refreshRepositoryProjects(project);
     } catch (error) {
       const existing = projectMessages.get(project.id);
       projectMessages.set(project.id, {
@@ -405,7 +414,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
     projectMessages.set(project.id, { text: 'Refreshing Git state…', error: false });
     render();
     try {
-      await refreshProject(project, true);
+      await refreshRepositoryProjects(project);
       projectMessages.set(project.id, { text: 'Git state refreshed.', error: false });
     } catch (error) {
       projectMessages.set(project.id, { text: actionError('Git refresh', error), error: true });
