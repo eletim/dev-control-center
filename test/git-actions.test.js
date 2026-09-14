@@ -138,6 +138,24 @@ test('manages worktrees from a linked checkout when core.bare is unset', async (
   );
 });
 
+test('does not treat a bare main repository as a branch-bearing worktree', async () => {
+  const source = await createRepository();
+  const bareRepository = `${source}.git`;
+  const linkedWorktree = `${source}-linked`;
+  await execFileAsync('git', ['clone', '-q', '--bare', source, bareRepository]);
+  await execFileAsync('git', ['--git-dir', bareRepository, 'branch', 'linked']);
+  await execFileAsync('git', [
+    '--git-dir', bareRepository, 'worktree', 'add', '-q', linkedWorktree, 'linked',
+  ]);
+
+  assert.deepEqual(await listWorktrees(linkedWorktree), [
+    { path: bareRepository, branch: null },
+    { path: linkedWorktree, branch: 'linked' },
+  ]);
+  await switchBranch(linkedWorktree, 'main');
+  assert.equal(await git(linkedWorktree, 'branch', '--show-current'), 'main');
+});
+
 test('refuses a branch checked out elsewhere and reports its worktree without removing it', async () => {
   const repository = await createRepository();
   const topicWorktree = `${repository}-topic\nHEAD path-fragment`;
