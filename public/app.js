@@ -316,9 +316,11 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
       : [project];
   }
 
-  function refreshRepositoryProjects(relatedProjects) {
-    return Promise.all(relatedProjects
+  async function refreshRepositoryProjects(relatedProjects) {
+    const results = await Promise.allSettled(relatedProjects
       .map((candidate) => refreshProject(candidate, true)));
+    const failure = results.find(({ status }) => status === 'rejected');
+    if (failure) throw failure.reason;
   }
 
   function projectsAreBusy(candidates) {

@@ -553,3 +553,69 @@ test('a deferred repository refresh blocks related actions that could supersede 
   assert.equal(projects.children[1]['aria-busy'], 'false');
   assert.ok(findElement(projects.children[1], 'Stopped'));
 });
+
+test('a failed repository refresh stays busy until a deferred sibling settles', async () => {
+  const document = createTestDocument();
+  const identity = '/projects/shared/.git';
+  const makeProject = (id, name) => ({
+    id,
+    name,
+    path: `/projects/${name}`,
+    startCommand: 'npm start',
+    status: 'stopped',
+    git: {
+      isRepository: true,
+      repositoryIdentity: identity,
+      branch: name,
+      clean: true,
+      remote: null,
+      ahead: null,
+      behind: null,
+    },
+  });
+  const first = makeProject('first', 'main');
+  const second = makeProject('second', 'linked');
+  const deferredSecondRefresh = deferred();
+  const requests = [];
+  const fetchImpl = (url, options = {}) => {
+    const method = options.method ?? 'GET';
+    requests.push(`${method} ${url}`);
+    if (url === '/api/projects') return Promise.resolve(jsonResponse([first, second]));
+    if (url.endsWith('/git/branches')) {
+      return Promise.resolve(jsonResponse({ branches: ['linked', 'main'] }));
+    }
+    if (url.endsWith('/git/worktrees')) {
+      return Promise.resolve(jsonResponse({
+        worktrees: [
+          { path: first.path, branch: 'main' },
+          { path: second.path, branch: 'linked' },
+        ],
+      }));
+    }
+    if (method === 'GET' && url === '/api/projects/first') {
+      return Promise.resolve(jsonResponse({ message: 'First refresh failed.' }, 500));
+    }
+    if (method === 'GET' && url === '/api/projects/second') return deferredSecondRefresh.promise;
+    if (method === 'POST' && url === '/api/projects/second/start') {
+      return Promise.resolve(jsonResponse({ ...second, status: 'running' }));
+    }
+    throw new Error(`Unexpected request: ${method} ${url}`);
+  };
+
+  const dashboard = initDashboard(document, fetchImpl, () => true);
+  await dashboard.ready;
+  const projects = document.elements.get('projects');
+  const refreshRun = findElement(projects.children[0], 'Refresh Git').dispatch('click');
+  await waitFor(() => requests.includes('GET /api/projects/second'));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const relatedCard = projects.children[1];
+  assert.equal(relatedCard['aria-busy'], 'true');
+  await findElement(relatedCard, 'Start').dispatch('click');
+  assert.equal(requests.includes('POST /api/projects/second/start'), false);
+
+  deferredSecondRefresh.resolve(jsonResponse(second));
+  await refreshRun;
+  assert.equal(projects.children[1]['aria-busy'], 'false');
+  assert.ok(findElement(projects.children[0], 'Git refresh failed: First refresh failed.'));
+});
