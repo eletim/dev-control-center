@@ -130,6 +130,11 @@ test('manages worktrees from a linked checkout when core.bare is unset', async (
     switchBranch(registeredWorktree, 'topic'),
     (error) => error.code === 'branch_in_use' && error.message.includes(removableWorktree),
   );
+  await assert.rejects(
+    removeWorktree(registeredWorktree, repository),
+    (error) => error.code === 'main_worktree' && /main worktree/.test(error.message),
+  );
+  await access(repository);
   await removeWorktree(registeredWorktree, removableWorktree);
   await assert.rejects(access(removableWorktree), { code: 'ENOENT' });
   await assert.rejects(
@@ -152,6 +157,11 @@ test('does not treat a bare main repository as a branch-bearing worktree', async
     { path: bareRepository, branch: null },
     { path: linkedWorktree, branch: 'linked' },
   ]);
+  await assert.rejects(
+    removeWorktree(linkedWorktree, bareRepository),
+    (error) => error.code === 'main_worktree' && /main worktree/.test(error.message),
+  );
+  await access(bareRepository);
   await switchBranch(linkedWorktree, 'main');
   assert.equal(await git(linkedWorktree, 'branch', '--show-current'), 'main');
 });
@@ -186,6 +196,13 @@ test('removes only an explicitly selected clean non-project worktree', async () 
 
   const unregistered = await mkdtemp(path.join(os.tmpdir(), 'dcc-not-worktree-'));
   await assert.rejects(removeWorktree(repository, unregistered), { code: 'invalid_worktree' });
+
+  const registeredProjectPath = path.join(topicWorktree, 'packages', 'app');
+  await mkdir(registeredProjectPath, { recursive: true });
+  await assert.rejects(
+    removeWorktree(repository, topicWorktree, [registeredProjectPath]),
+    { code: 'registered_worktree' },
+  );
 
   await removeWorktree(repository, topicWorktree);
   await assert.rejects(access(topicWorktree), { code: 'ENOENT' });
