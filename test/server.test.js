@@ -287,3 +287,50 @@ test('lists and explicitly removes only unregistered worktrees under project ser
     );
   });
 });
+
+test('rejects bare and non-bare repository main entries from linked projects', async () => {
+  await withServer(async (baseUrl, projectPath) => {
+    await execFileAsync('git', ['-C', projectPath, 'config', 'user.name', 'Dev Control Center Test']);
+    await execFileAsync('git', ['-C', projectPath, 'config', 'user.email', 'test@example.invalid']);
+    await writeFile(path.join(projectPath, 'README.md'), 'initial\n');
+    await execFileAsync('git', ['-C', projectPath, 'add', 'README.md']);
+    await execFileAsync('git', ['-C', projectPath, 'commit', '-qm', 'initial']);
+    await execFileAsync('git', ['-C', projectPath, 'branch', '-M', 'main']);
+
+    const linkedPath = `${projectPath}-linked`;
+    await execFileAsync('git', ['-C', projectPath, 'branch', 'linked']);
+    await execFileAsync('git', ['-C', projectPath, 'worktree', 'add', '-q', linkedPath, 'linked']);
+    const linkedProject = await fetch(`${baseUrl}/api/projects`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: linkedPath, startCommand: 'node app.js' }),
+    }).then((response) => response.json());
+    const nonBareRemoval = await fetch(`${baseUrl}/api/projects/${linkedProject.id}/git/worktrees`, {
+      method: 'DELETE',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: projectPath }),
+    });
+    assert.equal(nonBareRemoval.status, 409);
+    assert.equal((await nonBareRemoval.json()).error, 'main_worktree');
+
+    const bareRepository = `${projectPath}.git`;
+    const bareLinkedPath = `${projectPath}-bare-linked`;
+    await execFileAsync('git', ['clone', '-q', '--bare', projectPath, bareRepository]);
+    await execFileAsync('git', ['--git-dir', bareRepository, 'branch', 'bare-linked']);
+    await execFileAsync('git', [
+      '--git-dir', bareRepository, 'worktree', 'add', '-q', bareLinkedPath, 'bare-linked',
+    ]);
+    const bareLinkedProject = await fetch(`${baseUrl}/api/projects`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: bareLinkedPath, startCommand: 'node app.js' }),
+    }).then((response) => response.json());
+    const bareRemoval = await fetch(`${baseUrl}/api/projects/${bareLinkedProject.id}/git/worktrees`, {
+      method: 'DELETE',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: bareRepository }),
+    });
+    assert.equal(bareRemoval.status, 409);
+    assert.equal((await bareRemoval.json()).error, 'main_worktree');
+  });
+});

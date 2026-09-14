@@ -81,7 +81,7 @@ function branchFromHead(value) {
   return head.startsWith(prefix) ? head.slice(prefix.length) : null;
 }
 
-async function metadataWorktrees(repositoryPath) {
+async function mainWorktree(repositoryPath) {
   const commonDirectory = await repositoryIdentity(repositoryPath);
   const currentGitDirectory = await realpath(await git(repositoryPath, [
     'rev-parse', '--path-format=absolute', '--git-dir',
@@ -112,7 +112,12 @@ async function metadataWorktrees(repositoryPath) {
       : branchFromHead(await readFile(path.join(commonDirectory, 'HEAD'), 'utf8'));
   }
 
-  const worktrees = [{ path: mainPath, branch: mainBranch }];
+  return { commonDirectory, path: mainPath, branch: mainBranch };
+}
+
+async function metadataWorktrees(repositoryPath) {
+  const { commonDirectory, ...main } = await mainWorktree(repositoryPath);
+  const worktrees = [main];
   let entries;
   try {
     entries = await readdir(path.join(commonDirectory, 'worktrees'), { withFileTypes: true });
@@ -237,6 +242,15 @@ export async function removeWorktree(repositoryPath, worktreePath, protectedPath
   }
   if (worktree.canonicalPath === registeredPath) {
     throw new ProjectError('registered_worktree', 'The registered project worktree cannot be removed.');
+  }
+  let mainPath;
+  try {
+    mainPath = await realpath((await mainWorktree(repositoryPath)).path);
+  } catch {
+    throw new ProjectError('git_state_changed', 'Git worktree state changed before removal.');
+  }
+  if (worktree.canonicalPath === mainPath) {
+    throw new ProjectError('main_worktree', 'The repository main worktree cannot be removed.');
   }
   for (const protectedPath of protectedPaths) {
     let canonicalProtectedPath;

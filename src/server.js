@@ -173,7 +173,7 @@ export function createAppServer(
         const conflicts = [
           'duplicate_path', 'already_running', 'not_running', 'project_running',
           'dirty_worktree', 'git_state_changed', 'non_fast_forward', 'branch_in_use',
-          'registered_worktree', 'worktree_remove_failed',
+          'registered_worktree', 'main_worktree', 'worktree_remove_failed',
         ];
         const status = error.code === 'not_found' ? 404
           : error.code === 'shutting_down' ? 503
