@@ -101,7 +101,7 @@ async function metadataWorktrees(repositoryPath) {
     } catch {
       // Ordinary repositories infer their main worktree from the .git directory.
     }
-    const isBare = await git(repositoryPath, ['config', '--bool', 'core.bare']) === 'true';
+    const isBare = await git(repositoryPath, ['rev-parse', '--is-bare-repository']) === 'true';
     mainPath = configuredWorktree
       ? path.resolve(commonDirectory, configuredWorktree)
       : isBare ? commonDirectory : path.dirname(commonDirectory);

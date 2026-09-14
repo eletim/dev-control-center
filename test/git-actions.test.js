@@ -111,6 +111,33 @@ test('discovers worktrees when legacy porcelain paths contain attribute-like lin
   );
 });
 
+test('manages worktrees from a linked checkout when core.bare is unset', async () => {
+  const repository = await createRepository();
+  const registeredWorktree = `${repository}-registered`;
+  const removableWorktree = `${repository}-removable`;
+  await git(repository, 'branch', 'registered');
+  await git(repository, 'branch', 'topic');
+  await git(repository, 'worktree', 'add', registeredWorktree, 'registered');
+  await git(repository, 'worktree', 'add', removableWorktree, 'topic');
+  await git(repository, 'config', '--unset', 'core.bare');
+
+  assert.deepEqual(await listWorktrees(registeredWorktree), [
+    { path: repository, branch: 'main' },
+    { path: registeredWorktree, branch: 'registered' },
+    { path: removableWorktree, branch: 'topic' },
+  ]);
+  await assert.rejects(
+    switchBranch(registeredWorktree, 'topic'),
+    (error) => error.code === 'branch_in_use' && error.message.includes(removableWorktree),
+  );
+  await removeWorktree(registeredWorktree, removableWorktree);
+  await assert.rejects(access(removableWorktree), { code: 'ENOENT' });
+  await assert.rejects(
+    removeWorktree(registeredWorktree, registeredWorktree),
+    { code: 'registered_worktree' },
+  );
+});
+
 test('refuses a branch checked out elsewhere and reports its worktree without removing it', async () => {
   const repository = await createRepository();
   const topicWorktree = `${repository}-topic\nHEAD path-fragment`;
