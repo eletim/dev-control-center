@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
-import { realpath } from 'node:fs/promises';
+import { readdir, readFile, realpath } from 'node:fs/promises';
+import path from 'node:path';
 import { promisify } from 'node:util';
 import { ProjectError } from './project-store.js';
 
@@ -41,77 +42,90 @@ async function requireClean(repositoryPath) {
   }
 }
 
-function decodePorcelainValue(value) {
-  if (!value.startsWith('"') || !value.endsWith('"')) return value;
-
-  const bytes = [];
-  const escapes = new Map([
-    ['a', 0x07], ['b', 0x08], ['t', 0x09], ['n', 0x0a],
-    ['v', 0x0b], ['f', 0x0c], ['r', 0x0d], ['"', 0x22], ['\\', 0x5c],
-  ]);
-  for (let index = 1; index < value.length - 1;) {
-    if (value[index] !== '\\') {
-      const character = String.fromCodePoint(value.codePointAt(index));
-      bytes.push(...Buffer.from(character));
-      index += character.length;
-      continue;
-    }
-
-    const escaped = value[index + 1];
-    if (escapes.has(escaped)) {
-      bytes.push(escapes.get(escaped));
-      index += 2;
-      continue;
-    }
-    const octal = value.slice(index + 1).match(/^[0-7]{3}/)?.[0];
-    if (!octal) throw new Error('Invalid quoted value in Git worktree output.');
-    bytes.push(Number.parseInt(octal, 8));
-    index += 4;
-  }
-  return Buffer.from(bytes).toString('utf8');
-}
-
-function parseWorktrees(output) {
+function parseNulWorktrees(output) {
   const worktrees = [];
   let current = null;
-  let hasMetadata = false;
   const finishRecord = () => {
     if (current) worktrees.push(current);
     current = null;
-    hasMetadata = false;
   };
 
-  const delimiter = output.includes('\0') ? '\0' : '\n';
-  for (const line of output.split(delimiter)) {
-    if (!line) {
-      if (delimiter === '\0' || hasMetadata) finishRecord();
-      else if (current) current.path += '\n';
+  for (const field of output.split('\0')) {
+    if (!field) {
+      finishRecord();
       continue;
     }
-    const separator = line.indexOf(' ');
-    const attribute = separator === -1 ? line : line.slice(0, separator);
-    const value = separator === -1 ? '' : line.slice(separator + 1);
+    const separator = field.indexOf(' ');
+    const attribute = separator === -1 ? field : field.slice(0, separator);
+    const value = separator === -1 ? '' : field.slice(separator + 1);
     if (attribute === 'worktree') {
-      if (current && !hasMetadata && delimiter === '\n') {
-        current.path += `\n${line}`;
-      } else {
-        finishRecord();
-        current = { path: decodePorcelainValue(value), branch: null };
-      }
-    } else if (attribute === 'HEAD' && current) {
-      hasMetadata = true;
+      finishRecord();
+      current = { path: value, branch: null };
     } else if (attribute === 'branch' && current) {
-      const reference = decodePorcelainValue(value);
-      current.branch = reference.startsWith('refs/heads/')
-        ? reference.slice('refs/heads/'.length)
+      current.branch = value.startsWith('refs/heads/')
+        ? value.slice('refs/heads/'.length)
         : null;
-    } else if (current && !hasMetadata && delimiter === '\n') {
-      current.path += `\n${line}`;
-    } else if ((attribute === 'bare' || attribute === 'detached') && current) {
-      hasMetadata = true;
     }
   }
   finishRecord();
+  return worktrees;
+}
+
+function stripFinalNewline(value) {
+  return value.endsWith('\n') ? value.slice(0, -1) : value;
+}
+
+function branchFromHead(value) {
+  const head = stripFinalNewline(value);
+  const prefix = 'ref: refs/heads/';
+  return head.startsWith(prefix) ? head.slice(prefix.length) : null;
+}
+
+async function metadataWorktrees(repositoryPath) {
+  const commonDirectory = await repositoryIdentity(repositoryPath);
+  const currentGitDirectory = await realpath(await git(repositoryPath, [
+    'rev-parse', '--path-format=absolute', '--git-dir',
+  ]));
+  let mainPath;
+  let mainBranch;
+  if (currentGitDirectory === commonDirectory) {
+    mainPath = await worktreeRoot(repositoryPath);
+    mainBranch = branchFromHead(await readFile(path.join(commonDirectory, 'HEAD'), 'utf8'));
+  } else {
+    let configuredWorktree = null;
+    try {
+      configuredWorktree = await git(repositoryPath, [
+        'config', '-z', '--path', '--get', 'core.worktree',
+      ]);
+      if (configuredWorktree.endsWith('\0')) configuredWorktree = configuredWorktree.slice(0, -1);
+    } catch {
+      // Ordinary repositories infer their main worktree from the .git directory.
+    }
+    const isBare = await git(repositoryPath, ['config', '--bool', 'core.bare']) === 'true';
+    mainPath = configuredWorktree
+      ? path.resolve(commonDirectory, configuredWorktree)
+      : isBare ? commonDirectory : path.dirname(commonDirectory);
+    mainBranch = isBare
+      ? null
+      : branchFromHead(await readFile(path.join(commonDirectory, 'HEAD'), 'utf8'));
+  }
+
+  const worktrees = [{ path: mainPath, branch: mainBranch }];
+  let entries;
+  try {
+    entries = await readdir(path.join(commonDirectory, 'worktrees'), { withFileTypes: true });
+  } catch (error) {
+    if (error.code === 'ENOENT') return worktrees;
+    throw error;
+  }
+
+  for (const entry of entries.filter((candidate) => candidate.isDirectory())
+    .sort((left, right) => left.name.localeCompare(right.name))) {
+    const administrationPath = path.join(commonDirectory, 'worktrees', entry.name);
+    const gitFile = stripFinalNewline(await readFile(path.join(administrationPath, 'gitdir'), 'utf8'));
+    const head = await readFile(path.join(administrationPath, 'HEAD'), 'utf8');
+    worktrees.push({ path: path.dirname(gitFile), branch: branchFromHead(head) });
+  }
   return worktrees;
 }
 
@@ -198,15 +212,14 @@ export async function listBranches(repositoryPath) {
 
 export async function listWorktrees(repositoryPath) {
   await requireRepository(repositoryPath);
-  let output;
   try {
-    output = await git(repositoryPath, ['worktree', 'list', '--porcelain', '-z']);
+    const output = await git(repositoryPath, ['worktree', 'list', '--porcelain', '-z']);
+    return parseNulWorktrees(output);
   } catch {
-    // Git versions before NUL-delimited worktree output still have a stable
-    // record-oriented porcelain format, but require handling path continuations.
-    output = await git(repositoryPath, ['worktree', 'list', '--porcelain']);
+    // Newline-delimited porcelain cannot represent every valid path unambiguously.
+    // Older Git versions are read through their per-worktree metadata instead.
+    return metadataWorktrees(repositoryPath);
   }
-  return parseWorktrees(output);
 }
 
 export async function removeWorktree(repositoryPath, worktreePath) {

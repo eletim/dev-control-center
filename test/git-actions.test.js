@@ -81,27 +81,39 @@ test('discovers and switches only existing local branches from a clean worktree'
   await assert.rejects(switchBranch(repository, 'missing'), { code: 'invalid_branch' });
 });
 
-test('discovers worktree paths and branches from porcelain output with unusual paths', async () => {
+test('discovers worktrees when legacy porcelain paths contain attribute-like lines', async () => {
   const repository = await createRepository();
-  const topicWorktree = `${repository} topic\nworktree`;
-  await git(repository, 'branch', 'topic');
-  await git(repository, 'worktree', 'add', topicWorktree, 'topic');
+  const continuations = [
+    'HEAD path-fragment',
+    'branch path-fragment',
+    'worktree path-fragment',
+    'bare path-fragment',
+    'detached path-fragment',
+  ];
+  const expected = [{ path: repository, branch: 'main' }];
+  for (const [index, continuation] of continuations.entries()) {
+    const branch = `topic-${index}`;
+    const worktreePath = `${repository}-${index}\n${continuation}`;
+    await git(repository, 'branch', branch);
+    await git(repository, 'worktree', 'add', worktreePath, branch);
+    expected.push({ path: worktreePath, branch });
+  }
 
-  assert.deepEqual(await listWorktrees(repository), [
-    { path: repository, branch: 'main' },
-    { path: topicWorktree, branch: 'topic' },
-  ]);
+  assert.deepEqual(
+    (await listWorktrees(repository)).sort((left, right) => left.path.localeCompare(right.path)),
+    expected.sort((left, right) => left.path.localeCompare(right.path)),
+  );
 
-  await git(topicWorktree, 'switch', '--detach');
-  assert.deepEqual(await listWorktrees(repository), [
-    { path: repository, branch: 'main' },
-    { path: topicWorktree, branch: null },
-  ]);
+  await git(expected.at(-1).path, 'switch', '--detach');
+  assert.equal(
+    (await listWorktrees(repository)).find(({ path: worktreePath }) => worktreePath === expected.at(-1).path).branch,
+    null,
+  );
 });
 
 test('refuses a branch checked out elsewhere and reports its worktree without removing it', async () => {
   const repository = await createRepository();
-  const topicWorktree = `${repository}-topic worktree`;
+  const topicWorktree = `${repository}-topic\nHEAD path-fragment`;
   await git(repository, 'branch', 'topic');
   await git(repository, 'worktree', 'add', topicWorktree, 'topic');
 
@@ -115,7 +127,7 @@ test('refuses a branch checked out elsewhere and reports its worktree without re
 
 test('removes only an explicitly selected clean non-project worktree', async () => {
   const repository = await createRepository();
-  const topicWorktree = `${repository}-topic`;
+  const topicWorktree = `${repository}-topic\nbranch path-fragment`;
   await git(repository, 'branch', 'topic');
   await git(repository, 'worktree', 'add', topicWorktree, 'topic');
 
