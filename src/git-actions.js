@@ -229,6 +229,49 @@ export async function listWorktrees(repositoryPath) {
   }
 }
 
+export async function listWorktreesWithRemoval(repositoryPath, protectedPaths = []) {
+  const registeredPath = await worktreeRoot(repositoryPath);
+  const main = await mainWorktree(repositoryPath);
+  let mainPath;
+  try {
+    mainPath = await realpath(main.path);
+  } catch {
+    mainPath = path.resolve(main.path);
+  }
+  const canonicalProtectedPaths = await Promise.all(protectedPaths.map(async (protectedPath) => {
+    try {
+      return await realpath(protectedPath);
+    } catch {
+      return path.resolve(protectedPath);
+    }
+  }));
+
+  return Promise.all((await listWorktrees(repositoryPath)).map(async (worktree) => {
+    let canonicalPath;
+    try {
+      canonicalPath = await realpath(worktree.path);
+    } catch {
+      return { ...worktree, removable: false };
+    }
+    const protectsProject = canonicalProtectedPaths.some((protectedPath) => {
+      const relativePath = path.relative(canonicalPath, protectedPath);
+      return relativePath === '' || (!relativePath.startsWith(`..${path.sep}`) && relativePath !== '..'
+        && !path.isAbsolute(relativePath));
+    });
+    let clean = false;
+    try {
+      clean = !await git(canonicalPath, ['status', '--porcelain']);
+    } catch {
+      // If current state cannot be verified, removal must not be offered.
+    }
+    return {
+      ...worktree,
+      removable: clean && canonicalPath !== registeredPath && canonicalPath !== mainPath
+        && !protectsProject,
+    };
+  }));
+}
+
 export async function removeWorktree(repositoryPath, worktreePath, protectedPaths = []) {
   await requireRepository(repositoryPath);
   if (typeof worktreePath !== 'string' || !worktreePath) {

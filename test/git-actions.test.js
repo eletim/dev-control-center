@@ -6,7 +6,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';
 import {
-  fetchRepository, GitActionManager, listBranches, listWorktrees, removeWorktree,
+  fetchRepository, GitActionManager, listBranches, listWorktrees, listWorktreesWithRemoval, removeWorktree,
   switchBranch, updateRepository,
 } from '../src/git-actions.js';
 
@@ -190,6 +190,10 @@ test('removes only an explicitly selected clean non-project worktree', async () 
   assert.equal(await git(repository, 'branch', '--show-current'), 'main');
 
   await writeFile(path.join(topicWorktree, 'untracked.txt'), 'local work\n');
+  assert.deepEqual(await listWorktreesWithRemoval(repository), [
+    { path: repository, branch: 'main', removable: false },
+    { path: topicWorktree, branch: 'topic', removable: false },
+  ]);
   await assert.rejects(removeWorktree(repository, topicWorktree), { code: 'dirty_worktree' });
   assert.equal(await git(topicWorktree, 'branch', '--show-current'), 'topic');
   await unlink(path.join(topicWorktree, 'untracked.txt'));
@@ -199,10 +203,19 @@ test('removes only an explicitly selected clean non-project worktree', async () 
 
   const registeredProjectPath = path.join(topicWorktree, 'packages', 'app');
   await mkdir(registeredProjectPath, { recursive: true });
+  assert.deepEqual(await listWorktreesWithRemoval(repository, [registeredProjectPath]), [
+    { path: repository, branch: 'main', removable: false },
+    { path: topicWorktree, branch: 'topic', removable: false },
+  ]);
   await assert.rejects(
     removeWorktree(repository, topicWorktree, [registeredProjectPath]),
     { code: 'registered_worktree' },
   );
+
+  assert.deepEqual(await listWorktreesWithRemoval(repository), [
+    { path: repository, branch: 'main', removable: false },
+    { path: topicWorktree, branch: 'topic', removable: true },
+  ]);
 
   await removeWorktree(repository, topicWorktree);
   await assert.rejects(access(topicWorktree), { code: 'ENOENT' });

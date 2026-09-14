@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  fetchRepository, GitActionManager, listBranches, listWorktrees, removeWorktree,
+  fetchRepository, GitActionManager, listBranches, listWorktreesWithRemoval, removeWorktree,
   switchBranch, updateRepository,
 } from './git-actions.js';
 import { getGitMetadata } from './git-metadata.js';
@@ -109,13 +109,18 @@ export function createAppServer(
         const result = await processManager.withProjectLock(id, async () => {
           const project = await store.get(id);
           if (!project) throw new ProjectError('not_found', 'Project not found.');
-          return gitActionManager.withRepositoryLock(project.path, async () => {
-            if (request.method === 'GET') return listWorktrees(project.path);
-            await store.withProjectSnapshot(async (projects) => {
+          return gitActionManager.withRepositoryLock(project.path, async () => (
+            store.withProjectSnapshot(async (projects) => {
+              if (request.method === 'GET') {
+                return listWorktreesWithRemoval(
+                  project.path,
+                  projects.map((candidate) => candidate.path),
+                );
+              }
               await removeWorktree(project.path, input?.path, projects.map((candidate) => candidate.path));
-            });
-            return null;
-          });
+              return null;
+            })
+          ));
         });
         if (request.method === 'GET') sendJson(response, 200, { worktrees: result });
         else {
