@@ -207,8 +207,8 @@ test('lists and explicitly removes only unregistered worktrees under project ser
     const listed = await fetch(`${baseUrl}/api/projects/${project.id}/git/worktrees`);
     assert.equal(listed.status, 200);
     assert.deepEqual((await listed.json()).worktrees, [
-      { path: projectPath, branch: 'main' },
-      { path: worktreePath, branch: 'topic' },
+      { path: projectPath, branch: 'main', removable: false },
+      { path: worktreePath, branch: 'topic', removable: true },
     ]);
 
     const unrelatedPath = await mkdtemp(path.join(os.tmpdir(), 'dcc-unrelated-worktree-'));
@@ -266,6 +266,14 @@ test('lists and explicitly removes only unregistered worktrees under project ser
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ path: nestedProjectPath, startCommand: 'node app.js' }),
     }).then((response) => response.json());
+    assert.deepEqual(
+      (await fetch(`${baseUrl}/api/projects/${project.id}/git/worktrees`).then((response) => response.json()))
+        .worktrees,
+      [
+        { path: projectPath, branch: 'main', removable: false },
+        { path: worktreePath, branch: 'topic', removable: false },
+      ],
+    );
     const registeredRemoval = await fetch(`${baseUrl}/api/projects/${project.id}/git/worktrees`, {
       method: 'DELETE',
       headers: { 'content-type': 'application/json' },

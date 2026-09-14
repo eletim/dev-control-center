@@ -78,6 +78,12 @@ function findElement(root, text) {
   return null;
 }
 
+function findElements(root, text) {
+  const matches = root.textContent === text ? [root] : [];
+  for (const child of root.children) matches.push(...findElements(child, text));
+  return matches;
+}
+
 function deferred() {
   let resolve;
   const promise = new Promise((resolvePromise) => { resolve = resolvePromise; });
@@ -162,6 +168,11 @@ test('a deferred full refresh blocks save, delete, lifecycle, and Git submission
     if (url.endsWith('/git/branches')) {
       return Promise.resolve(jsonResponse({ branches: ['main', 'topic'] }));
     }
+    if (url.endsWith('/git/worktrees')) {
+      return Promise.resolve(jsonResponse({
+        worktrees: [{ path: project.path, branch: 'main', removable: false }],
+      }));
+    }
     return Promise.resolve(jsonResponse(project));
   };
   let confirmations = 0;
@@ -193,6 +204,7 @@ test('a deferred full refresh blocks save, delete, lifecycle, and Git submission
   assert.deepEqual(requests.map(({ url, method }) => `${method} ${url}`), [
     'GET /api/projects',
     'GET /api/projects/project-1/git/branches',
+    'GET /api/projects/project-1/git/worktrees',
     'GET /api/projects',
   ]);
 
@@ -228,6 +240,12 @@ test('pending actions block duplicates only for the affected project', async () 
     if (url === '/api/projects') return Promise.resolve(jsonResponse([first, second]));
     if (url.endsWith('/git/branches')) {
       return Promise.resolve(jsonResponse({ branches: ['main', 'topic'] }));
+    }
+    if (url.endsWith('/git/worktrees')) {
+      const project = url.includes('/project-1') ? first : second;
+      return Promise.resolve(jsonResponse({
+        worktrees: [{ path: project.path, branch: 'main', removable: false }],
+      }));
     }
     if (method === 'POST' && url === '/api/projects/project-1/start') {
       return firstActionResponse.promise;
@@ -270,4 +288,75 @@ test('pending actions block duplicates only for the affected project', async () 
   await firstAction;
   assert.equal(findElement(projects.children[0], 'Running').textContent, 'Running');
   assert.equal(document.elements.get('refresh').disabled, false);
+});
+
+test('shows worktree paths and branches and removes only after explicit confirmation', async () => {
+  const document = createTestDocument();
+  const project = {
+    id: 'project-1',
+    name: 'demo',
+    path: '/projects/demo',
+    startCommand: 'npm start',
+    status: 'stopped',
+    git: {
+      isRepository: true,
+      branch: 'main',
+      clean: true,
+      remote: null,
+      ahead: null,
+      behind: null,
+    },
+  };
+  const linkedPath = '/projects/demo-topic';
+  let linkedExists = true;
+  let confirmed = false;
+  const confirmations = [];
+  const requests = [];
+  const fetchImpl = (url, options = {}) => {
+    const method = options.method ?? 'GET';
+    requests.push(`${method} ${url}`);
+    if (url === '/api/projects') return Promise.resolve(jsonResponse([project]));
+    if (url.endsWith('/git/branches')) {
+      return Promise.resolve(jsonResponse({ branches: ['main', 'topic'] }));
+    }
+    if (url.endsWith('/git/worktrees') && method === 'GET') {
+      return Promise.resolve(jsonResponse({
+        worktrees: [
+          { path: project.path, branch: 'main', removable: false },
+          ...(linkedExists ? [{ path: linkedPath, branch: 'topic', removable: true }] : []),
+        ],
+      }));
+    }
+    if (url.endsWith('/git/worktrees') && method === 'DELETE') {
+      linkedExists = false;
+      return Promise.resolve(jsonResponse(null, 204));
+    }
+    return Promise.resolve(jsonResponse(project));
+  };
+  const dashboard = initDashboard(document, fetchImpl, (prompt) => {
+    confirmations.push(prompt);
+    return confirmed;
+  });
+  await dashboard.ready;
+
+  const projects = document.elements.get('projects');
+  assert.ok(findElement(projects, project.path));
+  assert.ok(findElement(projects, linkedPath));
+  assert.equal(findElements(projects, 'Branch').length, 3);
+  assert.ok(findElement(projects, 'main'));
+  assert.ok(findElement(projects, 'topic'));
+  assert.equal(findElements(projects, 'Remove Worktree').length, 1);
+
+  await findElement(projects, 'Remove Worktree').dispatch('click');
+  assert.equal(requests.filter((request) => request.startsWith('DELETE ')).length, 0);
+  assert.deepEqual(confirmations, [
+    `Remove worktree at ${linkedPath} (topic)? Branch Switch will not run automatically.`,
+  ]);
+
+  confirmed = true;
+  await findElement(projects, 'Remove Worktree').dispatch('click');
+  assert.equal(requests.filter((request) => request.startsWith('DELETE ')).length, 1);
+  assert.equal(findElement(projects, linkedPath), null);
+  assert.ok(findElement(projects, 'Remove worktree complete. Retry Branch Switch explicitly if needed.'));
+  assert.equal(requests.some((request) => request.includes('/git/switch')), false);
 });
