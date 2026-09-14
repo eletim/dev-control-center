@@ -6,7 +6,8 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';
 import {
-  fetchRepository, GitActionManager, listBranches, switchBranch, updateRepository,
+  fetchRepository, GitActionManager, listBranches, listWorktrees, removeWorktree,
+  switchBranch, updateRepository,
 } from '../src/git-actions.js';
 
 const execFileAsync = promisify(execFile);
@@ -78,6 +79,60 @@ test('discovers and switches only existing local branches from a clean worktree'
   await unlink(path.join(repository, 'untracked.txt'));
   await assert.rejects(switchBranch(repository, '--detach'), { code: 'invalid_branch' });
   await assert.rejects(switchBranch(repository, 'missing'), { code: 'invalid_branch' });
+});
+
+test('discovers worktree paths and branches from porcelain output with unusual paths', async () => {
+  const repository = await createRepository();
+  const topicWorktree = `${repository} topic\nworktree`;
+  await git(repository, 'branch', 'topic');
+  await git(repository, 'worktree', 'add', topicWorktree, 'topic');
+
+  assert.deepEqual(await listWorktrees(repository), [
+    { path: repository, branch: 'main' },
+    { path: topicWorktree, branch: 'topic' },
+  ]);
+
+  await git(topicWorktree, 'switch', '--detach');
+  assert.deepEqual(await listWorktrees(repository), [
+    { path: repository, branch: 'main' },
+    { path: topicWorktree, branch: null },
+  ]);
+});
+
+test('refuses a branch checked out elsewhere and reports its worktree without removing it', async () => {
+  const repository = await createRepository();
+  const topicWorktree = `${repository}-topic worktree`;
+  await git(repository, 'branch', 'topic');
+  await git(repository, 'worktree', 'add', topicWorktree, 'topic');
+
+  await assert.rejects(
+    switchBranch(repository, 'topic'),
+    (error) => error.code === 'branch_in_use' && error.message.includes(topicWorktree),
+  );
+  assert.equal(await git(repository, 'branch', '--show-current'), 'main');
+  assert.equal(await git(topicWorktree, 'branch', '--show-current'), 'topic');
+});
+
+test('removes only an explicitly selected clean non-project worktree', async () => {
+  const repository = await createRepository();
+  const topicWorktree = `${repository}-topic`;
+  await git(repository, 'branch', 'topic');
+  await git(repository, 'worktree', 'add', topicWorktree, 'topic');
+
+  await assert.rejects(removeWorktree(repository, repository), { code: 'registered_worktree' });
+  assert.equal(await git(repository, 'branch', '--show-current'), 'main');
+
+  await writeFile(path.join(topicWorktree, 'untracked.txt'), 'local work\n');
+  await assert.rejects(removeWorktree(repository, topicWorktree), { code: 'dirty_worktree' });
+  assert.equal(await git(topicWorktree, 'branch', '--show-current'), 'topic');
+  await unlink(path.join(topicWorktree, 'untracked.txt'));
+
+  const unregistered = await mkdtemp(path.join(os.tmpdir(), 'dcc-not-worktree-'));
+  await assert.rejects(removeWorktree(repository, unregistered), { code: 'invalid_worktree' });
+
+  await removeWorktree(repository, topicWorktree);
+  await assert.rejects(access(topicWorktree), { code: 'ENOENT' });
+  assert.deepEqual(await listWorktrees(repository), [{ path: repository, branch: 'main' }]);
 });
 
 test('fetches remotes and updates only by fast-forwarding the configured upstream', async () => {
