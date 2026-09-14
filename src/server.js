@@ -3,7 +3,8 @@ import { createServer } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  fetchRepository, GitActionManager, listBranches, switchBranch, updateRepository,
+  fetchRepository, GitActionManager, listBranches, listWorktrees, removeWorktree,
+  switchBranch, updateRepository,
 } from './git-actions.js';
 import { getGitMetadata } from './git-metadata.js';
 import { ProjectProcessManager } from './project-process-manager.js';
@@ -56,6 +57,7 @@ export function createAppServer(
       const match = url.pathname.match(/^\/api\/projects\/([^/]+)$/);
       const actionMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/(start|stop|restart)$/);
       const gitActionMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/git\/(branches|fetch|update|switch)$/);
+      const worktreeMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/git\/worktrees$/);
 
       if (request.method === 'GET' && url.pathname === '/api/projects') {
         const projects = await store.list();
@@ -99,6 +101,28 @@ export function createAppServer(
           sendJson(response, 200, await present(project, processManager));
           return;
         }
+      }
+
+      if (worktreeMatch && (request.method === 'GET' || request.method === 'DELETE')) {
+        const id = decodeURIComponent(worktreeMatch[1]);
+        const input = request.method === 'DELETE' ? await readJson(request) : null;
+        const result = await processManager.withProjectLock(id, async () => {
+          const project = await store.get(id);
+          if (!project) throw new ProjectError('not_found', 'Project not found.');
+          return gitActionManager.withRepositoryLock(project.path, async () => {
+            if (request.method === 'GET') return listWorktrees(project.path);
+            await store.withProjectSnapshot(async (projects) => {
+              await removeWorktree(project.path, input?.path, projects.map((candidate) => candidate.path));
+            });
+            return null;
+          });
+        });
+        if (request.method === 'GET') sendJson(response, 200, { worktrees: result });
+        else {
+          response.writeHead(204);
+          response.end();
+        }
+        return;
       }
 
       if (match && request.method === 'GET') {
@@ -148,7 +172,8 @@ export function createAppServer(
       if (error instanceof ProjectError) {
         const conflicts = [
           'duplicate_path', 'already_running', 'not_running', 'project_running',
-          'dirty_worktree', 'git_state_changed', 'non_fast_forward',
+          'dirty_worktree', 'git_state_changed', 'non_fast_forward', 'branch_in_use',
+          'registered_worktree', 'worktree_remove_failed',
         ];
         const status = error.code === 'not_found' ? 404
           : error.code === 'shutting_down' ? 503

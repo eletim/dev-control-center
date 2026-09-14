@@ -224,7 +224,7 @@ export async function listWorktrees(repositoryPath) {
   }
 }
 
-export async function removeWorktree(repositoryPath, worktreePath) {
+export async function removeWorktree(repositoryPath, worktreePath, protectedPaths = []) {
   await requireRepository(repositoryPath);
   if (typeof worktreePath !== 'string' || !worktreePath) {
     throw new ProjectError('invalid_worktree', 'An existing worktree path is required.');
@@ -237,6 +237,19 @@ export async function removeWorktree(repositoryPath, worktreePath) {
   }
   if (worktree.canonicalPath === registeredPath) {
     throw new ProjectError('registered_worktree', 'The registered project worktree cannot be removed.');
+  }
+  for (const protectedPath of protectedPaths) {
+    let canonicalProtectedPath;
+    try {
+      canonicalProtectedPath = await realpath(protectedPath);
+    } catch {
+      canonicalProtectedPath = path.resolve(protectedPath);
+    }
+    const relativePath = path.relative(worktree.canonicalPath, canonicalProtectedPath);
+    if (relativePath === '' || (!relativePath.startsWith(`..${path.sep}`) && relativePath !== '..'
+      && !path.isAbsolute(relativePath))) {
+      throw new ProjectError('registered_worktree', 'A registered project uses this Git worktree.');
+    }
   }
   await requireClean(worktree.canonicalPath);
 

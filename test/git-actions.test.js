@@ -187,6 +187,13 @@ test('removes only an explicitly selected clean non-project worktree', async () 
   const unregistered = await mkdtemp(path.join(os.tmpdir(), 'dcc-not-worktree-'));
   await assert.rejects(removeWorktree(repository, unregistered), { code: 'invalid_worktree' });
 
+  const registeredProjectPath = path.join(topicWorktree, 'packages', 'app');
+  await mkdir(registeredProjectPath, { recursive: true });
+  await assert.rejects(
+    removeWorktree(repository, topicWorktree, [registeredProjectPath]),
+    { code: 'registered_worktree' },
+  );
+
   await removeWorktree(repository, topicWorktree);
   await assert.rejects(access(topicWorktree), { code: 'ENOENT' });
   assert.deepEqual(await listWorktrees(repository), [{ path: repository, branch: 'main' }]);
