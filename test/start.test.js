@@ -32,7 +32,7 @@ async function launcherFixture(t) {
   await copyFile(path.join(repositoryRoot, 'start.sh'), path.join(root, 'start.sh'));
   await copyFile(path.join(repositoryRoot, 'sample_config.sh'), path.join(root, 'sample_config.sh'));
   await writeFile(path.join(bin, 'npm'), `#!/bin/sh
-printf '%s\\n' "npm:$*" "cwd:$PWD" "host:\${HOST-unset}" "port:\${PORT-unset}"
+printf '%s\\n' "npm:$*" "cwd:$PWD" "host:\${DCC_HOST-unset}" "port:\${DCC_PORT-unset}"
 `);
   await chmod(path.join(root, 'start.sh'), 0o755);
   await chmod(path.join(bin, 'npm'), 0o755);
@@ -56,12 +56,12 @@ test('starts with application defaults when config.sh is absent', async (t) => {
 
 test('loads config.sh while preserving environment overrides', async (t) => {
   const fixture = await launcherFixture(t);
-  await writeFile(path.join(fixture.root, 'config.sh'), `export HOST="\${HOST:-192.0.2.1}"
-export PORT="\${PORT:-4100}"
+  await writeFile(path.join(fixture.root, 'config.sh'), `export DCC_HOST="\${DCC_HOST:-192.0.2.1}"
+export DCC_PORT="\${DCC_PORT:-4100}"
 `);
 
   const { stdout } = await execFileAsync(path.join(fixture.root, 'start.sh'), {
-    env: { ...fixture.env, HOST: '127.0.0.9' },
+    env: { ...fixture.env, DCC_HOST: '127.0.0.9' },
   });
 
   assert.match(stdout, /host:127\.0\.0\.9/);
@@ -75,8 +75,8 @@ test('--configure creates a config from interactive answers before starting', as
   }, 'localhost\n4200\n');
 
   const config = await readFile(path.join(fixture.root, 'config.sh'), 'utf8');
-  assert.match(config, /HOST="\$\{HOST:-localhost\}"/);
-  assert.match(config, /PORT="\$\{PORT:-4200\}"/);
+  assert.match(config, /DCC_HOST="\$\{DCC_HOST:-localhost\}"/);
+  assert.match(config, /DCC_PORT="\$\{DCC_PORT:-4200\}"/);
   assert.match(stdout, /host:localhost/);
   assert.match(stdout, /port:4200/);
 });
@@ -88,8 +88,8 @@ test('--configure uses the public listen address and port 8023 by default', asyn
   }, '\n\n');
 
   const config = await readFile(path.join(fixture.root, 'config.sh'), 'utf8');
-  assert.match(config, /HOST="\$\{HOST:-0\.0\.0\.0\}"/);
-  assert.match(config, /PORT="\$\{PORT:-8023\}"/);
+  assert.match(config, /DCC_HOST="\$\{DCC_HOST:-0\.0\.0\.0\}"/);
+  assert.match(config, /DCC_PORT="\$\{DCC_PORT:-8023\}"/);
   assert.match(stdout, /host:0\.0\.0\.0/);
   assert.match(stdout, /port:8023/);
 });

@@ -3,8 +3,8 @@ import { ProjectProcessManager } from './project-process-manager.js';
 import { createAppServer } from './server.js';
 import { ProjectStore } from './project-store.js';
 
-const host = process.env.HOST || '0.0.0.0';
-const port = Number(process.env.PORT || 8023);
+const host = process.env.DCC_HOST || '0.0.0.0';
+const port = Number(process.env.DCC_PORT || 8023);
 const dataFile = path.resolve(process.env.DCC_DATA_FILE || '.data/projects.json');
 const processFile = path.resolve(process.env.DCC_PROCESS_FILE || `${dataFile}.processes`);
 const processManager = new ProjectProcessManager({
