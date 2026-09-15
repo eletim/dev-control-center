@@ -16,16 +16,17 @@ async function withServer(callback) {
   const projectPath = path.join(directory, 'demo');
   await mkdir(projectPath);
   await execFileAsync('git', ['init', '-q', projectPath]);
-  const processManager = new ProjectProcessManager({ stopTimeout: 250 });
+  const processManager = new ProjectProcessManager({
+    stopTimeout: 250,
+    sessionName: `dcc-server-test-${process.pid}-${path.basename(directory)}`,
+  });
   const server = createAppServer(new ProjectStore(path.join(directory, 'projects.json')), processManager);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address();
   try {
     await callback(`http://127.0.0.1:${port}`, projectPath, processManager);
   } finally {
-    for (const id of processManager.processes.keys()) {
-      if (processManager.isRunning(id)) await processManager.stop(id);
-    }
+    await processManager.stopAll();
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
 }
@@ -70,7 +71,7 @@ test('serves the web app and CRUD API with derived fields', async () => {
 });
 
 test('controls project lifecycle and blocks running project mutations', async () => {
-  await withServer(async (baseUrl, projectPath) => {
+  await withServer(async (baseUrl, projectPath, processManager) => {
     const pidFile = path.join(projectPath, 'server.pid');
     const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(`require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000)`)}`;
     const created = await fetch(`${baseUrl}/api/projects`, {
@@ -112,6 +113,9 @@ test('controls project lifecycle and blocks running project mutations', async ()
     const failedStart = await fetch(`${baseUrl}/api/projects/${created.id}/start`, { method: 'POST' });
     assert.equal(failedStart.status, 400);
     assert.equal((await failedStart.json()).error, 'start_failed');
+    assert.equal(processManager.processes.has(created.id), true);
+    assert.equal((await fetch(`${baseUrl}/api/projects/${created.id}`, { method: 'DELETE' })).status, 204);
+    assert.equal(processManager.processes.has(created.id), false);
   });
 });
 
@@ -180,5 +184,153 @@ test('exposes constrained Git actions and rechecks cleanliness inside the projec
 
     const unknownAction = await fetch(`${baseUrl}/api/projects/${project.id}/git/reset`, { method: 'POST' });
     assert.equal(unknownAction.status, 404);
+  });
+});
+
+test('lists and explicitly removes only unregistered worktrees under project serialization', async () => {
+  await withServer(async (baseUrl, projectPath, processManager) => {
+    await execFileAsync('git', ['-C', projectPath, 'config', 'user.name', 'Dev Control Center Test']);
+    await execFileAsync('git', ['-C', projectPath, 'config', 'user.email', 'test@example.invalid']);
+    await writeFile(path.join(projectPath, 'README.md'), 'initial\n');
+    await execFileAsync('git', ['-C', projectPath, 'add', 'README.md']);
+    await execFileAsync('git', ['-C', projectPath, 'commit', '-qm', 'initial']);
+    await execFileAsync('git', ['-C', projectPath, 'branch', '-M', 'main']);
+    await execFileAsync('git', ['-C', projectPath, 'branch', 'topic']);
+    const worktreePath = `${projectPath}-topic`;
+    await execFileAsync('git', ['-C', projectPath, 'worktree', 'add', '-q', worktreePath, 'topic']);
+
+    const project = await fetch(`${baseUrl}/api/projects`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: projectPath, startCommand: 'node app.js' }),
+    }).then((response) => response.json());
+    const listed = await fetch(`${baseUrl}/api/projects/${project.id}/git/worktrees`);
+    assert.equal(listed.status, 200);
+    assert.deepEqual((await listed.json()).worktrees, [
+      { path: projectPath, branch: 'main' },
+      { path: worktreePath, branch: 'topic' },
+    ]);
+
+    const unrelatedPath = await mkdtemp(path.join(os.tmpdir(), 'dcc-unrelated-worktree-'));
+    const unrelatedRemoval = await fetch(`${baseUrl}/api/projects/${project.id}/git/worktrees`, {
+      method: 'DELETE',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: unrelatedPath }),
+    });
+    assert.equal(unrelatedRemoval.status, 400);
+    assert.equal((await unrelatedRemoval.json()).error, 'invalid_worktree');
+
+    const projectRemoval = await fetch(`${baseUrl}/api/projects/${project.id}/git/worktrees`, {
+      method: 'DELETE',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: projectPath }),
+    });
+    assert.equal(projectRemoval.status, 409);
+    assert.equal((await projectRemoval.json()).error, 'registered_worktree');
+
+    const switchConflict = await fetch(`${baseUrl}/api/projects/${project.id}/git/switch`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ branch: 'topic' }),
+    });
+    assert.equal(switchConflict.status, 409);
+    const switchError = await switchConflict.json();
+    assert.equal(switchError.error, 'branch_in_use');
+    assert.match(switchError.message, new RegExp(worktreePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+
+    let releaseLock;
+    let lockStarted;
+    const started = new Promise((resolve) => { lockStarted = resolve; });
+    const heldLock = processManager.withProjectLock(project.id, async () => {
+      lockStarted();
+      await new Promise((resolve) => { releaseLock = resolve; });
+    });
+    await started;
+    const queuedRemoval = fetch(`${baseUrl}/api/projects/${project.id}/git/worktrees`, {
+      method: 'DELETE',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: worktreePath }),
+    });
+    await writeFile(path.join(worktreePath, 'local.txt'), 'local work\n');
+    releaseLock();
+    await heldLock;
+    const dirtyRemoval = await queuedRemoval;
+    assert.equal(dirtyRemoval.status, 409);
+    assert.equal((await dirtyRemoval.json()).error, 'dirty_worktree');
+    await unlink(path.join(worktreePath, 'local.txt'));
+
+    const nestedProjectPath = path.join(worktreePath, 'packages', 'nested');
+    await mkdir(nestedProjectPath, { recursive: true });
+    const nestedProject = await fetch(`${baseUrl}/api/projects`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: nestedProjectPath, startCommand: 'node app.js' }),
+    }).then((response) => response.json());
+    const registeredRemoval = await fetch(`${baseUrl}/api/projects/${project.id}/git/worktrees`, {
+      method: 'DELETE',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: worktreePath }),
+    });
+    assert.equal(registeredRemoval.status, 409);
+    assert.equal((await registeredRemoval.json()).error, 'registered_worktree');
+
+    assert.equal((await fetch(`${baseUrl}/api/projects/${nestedProject.id}`, { method: 'DELETE' })).status, 204);
+    const removed = await fetch(`${baseUrl}/api/projects/${project.id}/git/worktrees`, {
+      method: 'DELETE',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: worktreePath }),
+    });
+    assert.equal(removed.status, 204);
+    assert.deepEqual(
+      (await fetch(`${baseUrl}/api/projects/${project.id}`).then((response) => response.json())).path,
+      projectPath,
+    );
+  });
+});
+
+test('rejects bare and non-bare repository main entries from linked projects', async () => {
+  await withServer(async (baseUrl, projectPath) => {
+    await execFileAsync('git', ['-C', projectPath, 'config', 'user.name', 'Dev Control Center Test']);
+    await execFileAsync('git', ['-C', projectPath, 'config', 'user.email', 'test@example.invalid']);
+    await writeFile(path.join(projectPath, 'README.md'), 'initial\n');
+    await execFileAsync('git', ['-C', projectPath, 'add', 'README.md']);
+    await execFileAsync('git', ['-C', projectPath, 'commit', '-qm', 'initial']);
+    await execFileAsync('git', ['-C', projectPath, 'branch', '-M', 'main']);
+
+    const linkedPath = `${projectPath}-linked`;
+    await execFileAsync('git', ['-C', projectPath, 'branch', 'linked']);
+    await execFileAsync('git', ['-C', projectPath, 'worktree', 'add', '-q', linkedPath, 'linked']);
+    const linkedProject = await fetch(`${baseUrl}/api/projects`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: linkedPath, startCommand: 'node app.js' }),
+    }).then((response) => response.json());
+    const nonBareRemoval = await fetch(`${baseUrl}/api/projects/${linkedProject.id}/git/worktrees`, {
+      method: 'DELETE',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: projectPath }),
+    });
+    assert.equal(nonBareRemoval.status, 409);
+    assert.equal((await nonBareRemoval.json()).error, 'main_worktree');
+
+    const bareRepository = `${projectPath}.git`;
+    const bareLinkedPath = `${projectPath}-bare-linked`;
+    await execFileAsync('git', ['clone', '-q', '--bare', projectPath, bareRepository]);
+    await execFileAsync('git', ['--git-dir', bareRepository, 'branch', 'bare-linked']);
+    await execFileAsync('git', [
+      '--git-dir', bareRepository, 'worktree', 'add', '-q', bareLinkedPath, 'bare-linked',
+    ]);
+    const bareLinkedProject = await fetch(`${baseUrl}/api/projects`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: bareLinkedPath, startCommand: 'node app.js' }),
+    }).then((response) => response.json());
+    const bareRemoval = await fetch(`${baseUrl}/api/projects/${bareLinkedProject.id}/git/worktrees`, {
+      method: 'DELETE',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: bareRepository }),
+    });
+    assert.equal(bareRemoval.status, 409);
+    assert.equal((await bareRemoval.json()).error, 'main_worktree');
   });
 });

@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { repositoryIdentity } from './git-actions.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -21,10 +22,11 @@ export async function getGitMetadata(path) {
     return { isRepository: false };
   }
 
-  const [branchResult, statusResult, upstreamResult] = await Promise.allSettled([
+  const [branchResult, statusResult, upstreamResult, identityResult] = await Promise.allSettled([
     git(path, ['branch', '--show-current']),
     git(path, ['status', '--porcelain']),
     git(path, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}']),
+    repositoryIdentity(path),
   ]);
 
   const branch = branchResult.status === 'fulfilled' && branchResult.value
@@ -33,17 +35,26 @@ export async function getGitMetadata(path) {
   const clean = statusResult.status === 'fulfilled'
     ? statusResult.value.length === 0
     : null;
+  const repositoryIdentityValue = identityResult.status === 'fulfilled'
+    ? identityResult.value
+    : null;
+  const metadata = {
+    isRepository: true,
+    repositoryIdentity: repositoryIdentityValue,
+    branch,
+    clean,
+  };
 
   if (upstreamResult.status !== 'fulfilled') {
-    return { isRepository: true, branch, clean, remote: null, ahead: null, behind: null };
+    return { ...metadata, remote: null, ahead: null, behind: null };
   }
 
   const remote = upstreamResult.value;
   try {
     const counts = await git(path, ['rev-list', '--left-right', '--count', `HEAD...${remote}`]);
     const [ahead, behind] = counts.split(/\s+/).map(Number);
-    return { isRepository: true, branch, clean, remote, ahead, behind };
+    return { ...metadata, remote, ahead, behind };
   } catch {
-    return { isRepository: true, branch, clean, remote, ahead: null, behind: null };
+    return { ...metadata, remote, ahead: null, behind: null };
   }
 }

@@ -60,6 +60,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
   const pendingProjects = new Set();
   const projectMessages = new Map();
   const branchStates = new Map();
+  const worktreeStates = new Map();
 
   function actionError(label, error) {
     const kind = error instanceof ApiError && error.status >= 400 && error.status < 500
@@ -167,6 +168,41 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
       section.append(noBranches);
     }
 
+    const worktreeState = worktreeStates.get(project.id);
+    const worktreeHeading = documentObject.createElement('h5');
+    worktreeHeading.textContent = 'Worktrees';
+    section.append(worktreeHeading);
+    if (worktreeState?.status === 'ready') {
+      const worktreeList = documentObject.createElement('div');
+      worktreeList.className = 'worktree-list';
+      for (const worktree of worktreeState.worktrees) {
+        const row = documentObject.createElement('div');
+        row.className = 'worktree-row';
+        const worktreeMetadata = documentObject.createElement('dl');
+        worktreeMetadata.className = 'git-metadata worktree-metadata';
+        addMetadataRow(worktreeMetadata, 'Path', worktree.path);
+        addMetadataRow(worktreeMetadata, 'Branch', worktree.branch || 'Detached');
+        row.append(worktreeMetadata);
+        if (worktree.path !== project.path) {
+          row.append(makeButton(
+            'Remove Worktree',
+            'secondary compact',
+            busy,
+            () => removeProjectWorktree(project, worktree),
+          ));
+        }
+        worktreeList.append(row);
+      }
+      section.append(worktreeList);
+    } else {
+      const worktreeMessage = documentObject.createElement('p');
+      worktreeMessage.className = `inline-message ${worktreeState?.status === 'error' ? 'error' : 'unavailable'}`;
+      worktreeMessage.textContent = worktreeState?.status === 'error'
+        ? `Worktree list failed: ${worktreeState.message}`
+        : 'Loading worktrees…';
+      section.append(worktreeMessage);
+    }
+
     const gitActions = documentObject.createElement('div');
     gitActions.className = 'actions';
     gitActions.append(
@@ -242,6 +278,26 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
     render();
   }
 
+  async function loadWorktrees(project) {
+    worktreeStates.set(project.id, { status: 'loading' });
+    render();
+    try {
+      const body = await requestJson(
+        `/api/projects/${encodeURIComponent(project.id)}/git/worktrees`,
+        {},
+        fetchImpl,
+      );
+      worktreeStates.set(project.id, { status: 'ready', worktrees: body.worktrees });
+    } catch (error) {
+      worktreeStates.set(project.id, { status: 'error', message: error.message });
+    }
+    render();
+  }
+
+  function loadGitDetails(project) {
+    return Promise.all([loadBranches(project), loadWorktrees(project)]);
+  }
+
   async function refreshProject(project, includeBranches) {
     const refreshed = await requestJson(
       `/api/projects/${encodeURIComponent(project.id)}`,
@@ -250,12 +306,33 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
     );
     replaceProject(refreshed);
     render();
-    if (includeBranches && refreshed.git?.isRepository) await loadBranches(refreshed);
+    if (includeBranches && refreshed.git?.isRepository) await loadGitDetails(refreshed);
+  }
+
+  function projectsSharingRepository(project) {
+    const identity = project.git?.repositoryIdentity;
+    return identity
+      ? projects.filter((candidate) => candidate.git?.repositoryIdentity === identity)
+      : [project];
+  }
+
+  async function refreshRepositoryProjects(relatedProjects) {
+    const results = await Promise.allSettled(relatedProjects
+      .map((candidate) => refreshProject(candidate, true)));
+    const failure = results.find(({ status }) => status === 'rejected');
+    if (failure) throw failure.reason;
+  }
+
+  function projectsAreBusy(candidates) {
+    return loadingProjects || candidates.some(({ id }) => (
+      pendingProjects.has(id) || savingProjectId === id
+    ));
   }
 
   async function performProjectAction(project, label, request, includeBranches) {
-    if (loadingProjects || pendingProjects.has(project.id) || savingProjectId === project.id) return;
-    pendingProjects.add(project.id);
+    const affectedProjects = includeBranches ? projectsSharingRepository(project) : [project];
+    if (projectsAreBusy(affectedProjects)) return;
+    for (const { id } of affectedProjects) pendingProjects.add(id);
     projectMessages.set(project.id, { text: `${label} in progress…`, error: false });
     render();
     try {
@@ -266,7 +343,8 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
       projectMessages.set(project.id, { text: actionError(label, error), error: true });
     }
     try {
-      await refreshProject(project, includeBranches);
+      if (includeBranches) await refreshRepositoryProjects(affectedProjects);
+      else await refreshProject(project, false);
     } catch (error) {
       const existing = projectMessages.get(project.id);
       projectMessages.set(project.id, {
@@ -274,7 +352,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
         error: true,
       });
     } finally {
-      pendingProjects.delete(project.id);
+      for (const { id } of affectedProjects) pendingProjects.delete(id);
       render();
       await reconcileProjectsWhenIdle();
     }
@@ -309,18 +387,54 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
     );
   }
 
+  async function removeProjectWorktree(project, worktree) {
+    const affectedProjects = projectsSharingRepository(project);
+    if (projectsAreBusy(affectedProjects)
+      || !confirmImpl(`Remove worktree at ${worktree.path} (${worktree.branch || 'Detached'})? Branch Switch will not run automatically.`)) return;
+    for (const { id } of affectedProjects) pendingProjects.add(id);
+    projectMessages.set(project.id, { text: 'Remove worktree in progress…', error: false });
+    render();
+    try {
+      await requestJson(`/api/projects/${encodeURIComponent(project.id)}/git/worktrees`, {
+        method: 'DELETE',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: worktree.path }),
+      }, fetchImpl);
+      projectMessages.set(project.id, {
+        text: 'Remove worktree complete. Retry Branch Switch explicitly if needed.',
+        error: false,
+      });
+    } catch (error) {
+      projectMessages.set(project.id, { text: actionError('Remove worktree', error), error: true });
+    }
+    try {
+      await refreshRepositoryProjects(affectedProjects);
+    } catch (error) {
+      const existing = projectMessages.get(project.id);
+      projectMessages.set(project.id, {
+        text: `${existing?.text || 'Remove worktree finished.'} State refresh failed: ${error.message}`,
+        error: true,
+      });
+    } finally {
+      for (const { id } of affectedProjects) pendingProjects.delete(id);
+      render();
+      await reconcileProjectsWhenIdle();
+    }
+  }
+
   async function refreshGit(project) {
-    if (loadingProjects || pendingProjects.has(project.id) || savingProjectId === project.id) return;
-    pendingProjects.add(project.id);
+    const affectedProjects = projectsSharingRepository(project);
+    if (projectsAreBusy(affectedProjects)) return;
+    for (const { id } of affectedProjects) pendingProjects.add(id);
     projectMessages.set(project.id, { text: 'Refreshing Git state…', error: false });
     render();
     try {
-      await refreshProject(project, true);
+      await refreshRepositoryProjects(affectedProjects);
       projectMessages.set(project.id, { text: 'Git state refreshed.', error: false });
     } catch (error) {
       projectMessages.set(project.id, { text: actionError('Git refresh', error), error: true });
     } finally {
-      pendingProjects.delete(project.id);
+      for (const { id } of affectedProjects) pendingProjects.delete(id);
       render();
       await reconcileProjectsWhenIdle();
     }
@@ -335,11 +449,12 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
       projects = await requestJson('/api/projects', {}, fetchImpl);
       const projectIds = new Set(projects.map(({ id }) => id));
       for (const id of branchStates.keys()) if (!projectIds.has(id)) branchStates.delete(id);
+      for (const id of worktreeStates.keys()) if (!projectIds.has(id)) worktreeStates.delete(id);
       for (const id of projectMessages.keys()) if (!projectIds.has(id)) projectMessages.delete(id);
       render();
       await Promise.all(projects
         .filter((project) => project.git?.isRepository)
-        .map((project) => loadBranches(project)));
+        .map((project) => loadGitDetails(project)));
     } catch (error) {
       message.textContent = `Project refresh failed: ${error.message}`;
     } finally {
@@ -382,6 +497,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
       if (idInput.value === project.id) resetForm();
       projects = projects.filter(({ id }) => id !== project.id);
       branchStates.delete(project.id);
+      worktreeStates.delete(project.id);
       projectMessages.delete(project.id);
       projectsRefreshRequired = true;
     } catch (error) {

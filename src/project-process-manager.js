@@ -1,19 +1,50 @@
-import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { execFile, spawnSync } from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { ProjectError } from './project-store.js';
 
-const processTokenName = 'DEV_CONTROL_CENTER_PROCESS_TOKEN';
+const execFileAsync = promisify(execFile);
 const processSupervisorPath = fileURLToPath(new URL('./process-supervisor.js', import.meta.url));
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
+function shellQuote(value) {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+export function projectWindowName(project) {
+  const basename = path.basename(project.path)
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 32) || 'project';
+  const identity = createHash('sha256').update(project.id).digest('hex').slice(0, 12);
+  return `${basename}-${identity}`;
+}
+
 export class ProjectProcessManager {
-  constructor({ stateFile = null, startupDelay = 150, stopTimeout = 2000, pollInterval = 25 } = {}) {
+  constructor({
+    stateFile = null,
+    sessionName = 'dev-control-center',
+    tmuxPath = 'tmux',
+    tmuxSocketName = null,
+    startupDelay = 150,
+    stopTimeout = 2000,
+    pollInterval = 25,
+  } = {}) {
+    if (!/^[A-Za-z0-9_-]+$/.test(sessionName)) {
+      throw new Error('The tmux session name may contain only letters, numbers, underscores, and hyphens.');
+    }
     this.processes = new Map();
     this.queues = new Map();
     this.stateFile = stateFile;
+    this.sessionName = sessionName;
+    this.tmuxPath = tmuxPath;
+    this.tmuxSocketName = tmuxSocketName;
     this.startupDelay = startupDelay;
     this.stopTimeout = stopTimeout;
     this.pollInterval = pollInterval;
@@ -43,9 +74,13 @@ export class ProjectProcessManager {
   isRunning(id) {
     const managed = this.processes.get(id);
     if (!managed) return false;
-    if (this.#ownsProcessGroup(managed)) return true;
-    this.#forget(id, managed);
-    return false;
+    if (managed.pending) return false;
+    const pane = this.#paneState(managed);
+    if (!pane) {
+      this.#forget(id, managed);
+      return false;
+    }
+    return !pane.dead;
   }
 
   start(project) {
@@ -64,6 +99,10 @@ export class ProjectProcessManager {
       await this.#stop(project.id, false);
       await this.#start(project);
     });
+  }
+
+  remove(id) {
+    return this.#stop(id, false);
   }
 
   perform(id, action, getProject) {
@@ -120,71 +159,143 @@ export class ProjectProcessManager {
       throw new ProjectError('already_running', 'Project is already running.');
     }
 
-    const token = randomUUID();
-    const child = spawn(process.execPath, [processSupervisorPath, project.startCommand], {
-      cwd: project.path,
-      detached: true,
-      env: { ...process.env, [processTokenName]: token },
-      stdio: 'ignore',
-    });
-    const managed = {
-      child,
-      processGroupId: child.pid,
-      processGroupStartTime: null,
-      token,
-      local: true,
-      monitor: null,
-    };
-    this.processes.set(project.id, managed);
-    const exited = new Promise((resolve) => child.once('exit', (code, signal) => resolve({ code, signal })));
+    let managed = this.processes.get(project.id);
+    if (managed) {
+      const pane = this.#paneState(managed);
+      if (pane && !pane.dead) {
+        this.processes.set(project.id, managed);
+        this.#persist();
+        throw new ProjectError('already_running', 'Project is already running.');
+      }
+      await this.#killWindow(managed);
+      this.#forget(project.id, managed);
+    }
 
+    const pending = {
+      pending: true,
+      sessionName: this.sessionName,
+      windowName: projectWindowName(project),
+      token: randomUUID(),
+    };
+    this.processes.set(project.id, pending);
+    this.#persist();
+
+    let startupDeadline;
     try {
-      await new Promise((resolve, reject) => {
-        child.once('spawn', resolve);
-        child.once('error', reject);
-      });
-      managed.processGroupStartTime = this.#processStartTime(child.pid);
-      if (!managed.processGroupStartTime) throw new Error('process exited before its identity could be recorded');
+      managed = await this.#createWindow(project, pending);
+      startupDeadline = Date.now() + this.startupDelay;
+      let pane = this.#paneState(managed, false);
+      while (pane && !pane.dead && !pane.started && Date.now() < startupDeadline) {
+        await delay(Math.min(this.pollInterval, startupDeadline - Date.now()));
+        pane = this.#paneState(managed, false);
+      }
+      if (!pane?.started) {
+        throw new Error('tmux pane did not confirm that the Start Command began');
+      }
+      this.processes.set(project.id, managed);
       this.#persist();
     } catch (error) {
-      if (managed.processGroupId && this.#ownsProcessGroup(managed)) await this.#stop(project.id, false);
-      else this.#forget(project.id, managed);
-      throw new ProjectError('start_failed', `Could not start project: ${error.message}`);
+      await this.#killPendingWindow(pending);
+      this.#forget(project.id, pending);
+      throw new ProjectError('start_failed', `Could not start project in tmux: ${error.message}`);
     }
 
-    child.unref();
-    this.#monitor(project.id, managed);
-    const earlyExit = await Promise.race([exited, delay(this.startupDelay).then(() => null)]);
-    if (earlyExit && (earlyExit.code !== 0 || earlyExit.signal)) {
-      await this.#stop(project.id, false);
-      const reason = earlyExit.signal ? `signal ${earlyExit.signal}` : `exit code ${earlyExit.code}`;
-      throw new ProjectError('start_failed', `Start Command failed with ${reason}.`);
+    await delay(Math.max(0, startupDeadline - Date.now()));
+    const pane = this.#paneState(managed);
+    if (pane?.dead && (pane.status !== 0 || pane.signal)) {
+      const reason = pane.signal ? `signal ${pane.signal}` : `exit code ${pane.status}`;
+      throw new ProjectError('start_failed', `Start Command failed with ${reason}. Output remains in tmux window ${managed.windowName}.`);
     }
-    this.isRunning(project.id);
+  }
+
+  async #createWindow(project, pending) {
+    const { token, windowName } = pending;
+    const format = '#{session_id}\t#{window_id}\t#{pane_id}\t#{session_created}\t#{pid}';
+    let result;
+    const newWindowArguments = ['new-window', '-d', '-P', '-F', format, '-t', this.sessionName, '-n', windowName, '-c', project.path];
+    if (this.#sessionExists()) {
+      result = await this.#tmux(newWindowArguments);
+    } else {
+      try {
+        result = await this.#tmux(['new-session', '-d', '-P', '-F', format, '-s', this.sessionName, '-n', windowName, '-c', project.path]);
+      } catch (error) {
+        if (!/duplicate session/i.test(error.message)) throw error;
+        result = await this.#tmux(newWindowArguments);
+      }
+    }
+    const [sessionId, windowId, paneId, sessionCreated, serverPid] = result.stdout.trim().split('\t');
+    if (!/^\$\d+$/.test(sessionId) || !/^@\d+$/.test(windowId) || !/^%\d+$/.test(paneId)
+      || !/^\d+$/.test(sessionCreated) || !/^\d+$/.test(serverPid)) {
+      throw new Error('tmux did not return a session, window, and pane identity');
+    }
+    Object.assign(pending, { sessionId, windowId, paneId, sessionCreated, serverPid });
+    const managed = {
+      sessionName: this.sessionName,
+      sessionId,
+      windowName,
+      windowId,
+      paneId,
+      token,
+    };
+    try {
+      this.#persist();
+      await this.#tmux(['set-option', '-p', '-t', paneId, '@dcc_owner_token', token]);
+      await this.#tmux(['set-option', '-w', '-t', windowId, 'remain-on-exit', 'on']);
+      await this.#tmux(['set-option', '-w', '-t', windowId, 'automatic-rename', 'off']);
+      await this.#tmux(['set-option', '-w', '-t', windowId, 'allow-rename', 'off']);
+      const supervisor = [process.execPath, processSupervisorPath, project.startCommand].map(shellQuote).join(' ');
+      const command = `${shellQuote(this.tmuxPath)} set-option -p -t "$TMUX_PANE" @dcc_command_started ${shellQuote(token)} && exec ${supervisor}`;
+      await this.#tmux(['respawn-pane', '-k', '-t', paneId, '-c', project.path, command]);
+      return managed;
+    } catch (error) {
+      await this.#killPendingWindow(pending);
+      throw error;
+    }
   }
 
   async #stop(id, requireRunning) {
-    if (!this.isRunning(id)) {
+    const managed = this.processes.get(id);
+    if (!managed) {
+      if (requireRunning) throw new ProjectError('not_running', 'Project is not running.');
+      return;
+    }
+    if (managed.pending) {
+      this.#forget(id, managed);
       if (requireRunning) throw new ProjectError('not_running', 'Project is not running.');
       return;
     }
 
-    const managed = this.processes.get(id);
-    this.#signal(managed.processGroupId, 'SIGTERM');
+    const pane = this.#paneState(managed);
+    if (!pane) {
+      this.#forget(id, managed);
+      if (requireRunning) throw new ProjectError('not_running', 'Project is not running.');
+      return;
+    }
+    if (pane.dead) {
+      if (requireRunning) throw new ProjectError('not_running', 'Project is not running.');
+      await this.#killWindow(managed);
+      this.#forget(id, managed);
+      return;
+    }
+
+    this.#signalPane(managed, 'SIGTERM');
     let deadline = Date.now() + this.stopTimeout;
     while (this.isRunning(id) && Date.now() < deadline) await delay(this.pollInterval);
     if (this.isRunning(id)) {
-      this.#signal(managed.processGroupId, 'SIGKILL');
+      this.#signalPane(managed, 'SIGKILL');
       deadline = Date.now() + this.stopTimeout;
       while (this.isRunning(id) && Date.now() < deadline) await delay(this.pollInterval);
     }
     if (this.isRunning(id)) throw new ProjectError('stop_failed', 'Could not stop the project process group.');
+    await this.#killWindow(managed);
     this.#forget(id, managed);
   }
 
-  #signal(processGroupId, signal) {
+  #signalPane(managed, signal) {
+    const pane = this.#paneState(managed);
+    if (!pane || !Number.isInteger(pane.pid)) return;
     try {
-      process.kill(-processGroupId, signal);
+      process.kill(-pane.pid, signal);
     } catch (error) {
       if (error.code !== 'ESRCH') throw error;
     }
@@ -196,64 +307,100 @@ export class ProjectProcessManager {
     }
   }
 
-  #ownsProcessGroup(managed) {
-    let processIds;
+  #sessionExists() {
+    return this.#tmuxSync(['has-session', '-t', `=${this.sessionName}`], { stdio: 'ignore' }).status === 0;
+  }
+
+  #paneState(managed, requireStarted = true) {
+    const result = this.#tmuxQuery([
+      'display-message', '-p', '-t', managed.paneId,
+      '#{session_name}\t#{session_id}\t#{window_name}\t#{window_id}\t#{pane_id}\t#{@dcc_owner_token}\t#{@dcc_command_started}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_dead_signal}\t#{pane_pid}',
+    ], { encoding: 'utf8' });
+    if (!result) return null;
+    const [sessionName, sessionId, windowName, windowId, paneId, token, commandStarted, dead, status, signal, pid]
+      = result.stdout.trim().split('\t');
+    if (sessionName !== managed.sessionName || sessionId !== managed.sessionId
+      || windowName !== managed.windowName || windowId !== managed.windowId
+      || paneId !== managed.paneId || token !== managed.token
+      || (requireStarted && commandStarted !== managed.token)) return null;
+    return {
+      started: commandStarted === managed.token,
+      dead: dead === '1',
+      status: status === '' ? null : Number(status),
+      signal: signal || null,
+      pid: Number(pid),
+    };
+  }
+
+  #findPendingWindow(pending) {
+    if (/^\$\d+$/.test(pending.sessionId) && /^@\d+$/.test(pending.windowId)
+      && /^%\d+$/.test(pending.paneId) && /^\d+$/.test(pending.sessionCreated)
+      && /^\d+$/.test(pending.serverPid)) {
+      const result = this.#tmuxQuery([
+        'display-message', '-p', '-t', pending.paneId,
+        '#{session_name}\t#{session_id}\t#{session_created}\t#{pid}\t#{window_name}\t#{window_id}\t#{pane_id}\t#{@dcc_owner_token}\t#{@dcc_command_started}',
+      ], { encoding: 'utf8' });
+      if (!result) return null;
+      const [sessionName, sessionId, sessionCreated, serverPid, windowName, windowId, paneId, token, commandStarted]
+        = result.stdout.trim().split('\t');
+      if (sessionName !== pending.sessionName || sessionId !== pending.sessionId
+        || sessionCreated !== pending.sessionCreated || serverPid !== pending.serverPid
+        || windowId !== pending.windowId
+        || paneId !== pending.paneId || (token && token !== pending.token)) return null;
+      return {
+        managed: { sessionName, sessionId, windowName, windowId, paneId, token: pending.token },
+        started: token === pending.token && commandStarted === pending.token,
+      };
+    }
+
+    const result = this.#tmuxQuery([
+      'list-panes', '-a', '-F',
+      '#{session_name}\t#{session_id}\t#{window_name}\t#{window_id}\t#{pane_id}\t#{@dcc_owner_token}\t#{@dcc_command_started}',
+    ], { encoding: 'utf8' });
+    if (!result) return null;
+    const matches = result.stdout.trim().split('\n').flatMap((line) => {
+      const [sessionName, sessionId, windowName, windowId, paneId, token, commandStarted] = line.split('\t');
+      if (sessionName !== pending.sessionName || windowName !== pending.windowName
+        || token !== pending.token) return [];
+      return [{
+        managed: { sessionName, sessionId, windowName, windowId, paneId, token },
+        started: commandStarted === pending.token,
+      }];
+    });
+    if (matches.length > 1) throw new Error('Multiple tmux panes claim the same project ownership token.');
+    return matches[0] ?? null;
+  }
+
+  async #killWindow(managed, requireStarted = true) {
+    if (!managed?.windowId || !this.#paneState(managed, requireStarted)) return;
     try {
-      processIds = readdirSync('/proc').filter((entry) => /^\d+$/.test(entry));
-    } catch {
-      if (!managed.local) return false;
-      try {
-        process.kill(-managed.processGroupId, 0);
-        return true;
-      } catch (error) {
-        if (error.code === 'EPERM') return true;
-        if (error.code === 'ESRCH') return false;
-        throw error;
-      }
+      await this.#tmux(['kill-window', '-t', managed.windowId]);
+    } catch (error) {
+      if (!/can't find|no server running|no such/i.test(error.message)) throw error;
     }
-
-    if (!managed.processGroupStartTime) {
-      if (!this.#tokenOwnsProcessGroup(managed, processIds)) return false;
-      managed.processGroupStartTime = this.#processStartTime(managed.processGroupId);
-      if (!managed.processGroupStartTime) return false;
-      this.#persist();
-    }
-
-    if (this.#processStartTime(managed.processGroupId) !== managed.processGroupStartTime) return false;
-    return processIds.some((processId) => {
-      try {
-        const stat = readFileSync(`/proc/${processId}/stat`, 'utf8');
-        const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
-        return fields[0] !== 'Z' && Number(fields[2]) === managed.processGroupId;
-      } catch {
-        return false;
-      }
-    });
   }
 
-  #tokenOwnsProcessGroup(managed, processIds) {
-    const expectedToken = `${processTokenName}=${managed.token}`;
-    return processIds.some((processId) => {
-      try {
-        const stat = readFileSync(`/proc/${processId}/stat`, 'utf8');
-        const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
-        if (Number(fields[2]) !== managed.processGroupId) return false;
-        const environment = readFileSync(`/proc/${processId}/environ`).toString('utf8').split('\0');
-        return environment.includes(expectedToken);
-      } catch {
-        return false;
-      }
-    });
+  async #killPendingWindow(pending) {
+    const pendingWindow = this.#findPendingWindow(pending);
+    if (!pendingWindow) return;
+    try {
+      await this.#tmux(['kill-window', '-t', pendingWindow.managed.windowId]);
+    } catch (error) {
+      if (!/can't find|no server running|no such/i.test(error.message)) throw error;
+    }
   }
 
-  #monitor(id, managed) {
-    managed.monitor = setInterval(() => this.isRunning(id), 1000);
-    managed.monitor.unref();
+  #killPendingWindowSync(pending) {
+    const pendingWindow = this.#findPendingWindow(pending);
+    if (!pendingWindow) return null;
+    if (!pendingWindow.started) {
+      this.#tmuxQuery(['kill-window', '-t', pendingWindow.managed.windowId], { encoding: 'utf8' });
+    }
+    return pendingWindow;
   }
 
   #forget(id, managed) {
-    if (this.processes.get(id) !== managed) return;
-    if (managed.monitor) clearInterval(managed.monitor);
+    if (managed && this.processes.get(id) !== managed) return;
     this.processes.delete(id);
     this.#persist();
   }
@@ -270,27 +417,85 @@ export class ProjectProcessManager {
     }
 
     for (const record of records) {
-      if (typeof record.id !== 'string' || !Number.isInteger(record.processGroupId) || typeof record.token !== 'string') continue;
-      const managed = { child: null, ...record, local: false, monitor: null };
-      if (!this.#ownsProcessGroup(managed)) continue;
-      this.processes.set(record.id, managed);
-      this.#monitor(record.id, managed);
+      if (typeof record.id !== 'string' || typeof record.sessionName !== 'string'
+        || typeof record.windowName !== 'string' || typeof record.token !== 'string'
+        || record.token.length < 32) continue;
+      const base = {
+        sessionName: record.sessionName,
+        windowName: record.windowName,
+        token: record.token,
+      };
+      if (record.pending === true) {
+        const pendingWindow = this.#killPendingWindowSync({
+          ...base,
+          sessionId: record.sessionId,
+          windowId: record.windowId,
+          paneId: record.paneId,
+          sessionCreated: record.sessionCreated,
+          serverPid: record.serverPid,
+        });
+        if (pendingWindow?.started) this.#rememberRecoveredProcess(record.id, pendingWindow.managed);
+        continue;
+      }
+      if (!/^\$\d+$/.test(record.sessionId) || !/^@\d+$/.test(record.windowId)
+        || !/^%\d+$/.test(record.paneId)) continue;
+      const managed = {
+        ...base,
+        sessionId: record.sessionId,
+        windowId: record.windowId,
+        paneId: record.paneId,
+      };
+      const pane = this.#paneState(managed, false);
+      if (pane?.started) this.#rememberRecoveredProcess(record.id, managed);
+      else if (pane) this.#tmuxQuery(['kill-window', '-t', managed.windowId], { encoding: 'utf8' });
     }
     this.#persist();
   }
 
+  #rememberRecoveredProcess(id, managed) {
+    if (this.processes.has(id)) {
+      throw new Error(`Multiple live tmux windows are recorded for project ${id}.`);
+    }
+    this.processes.set(id, managed);
+  }
+
   #persist() {
     if (!this.stateFile) return;
-    const records = [...this.processes.entries()].map(([id, managed]) => ({
-      id,
-      processGroupId: managed.processGroupId,
-      processGroupStartTime: managed.processGroupStartTime,
-      token: managed.token,
-    }));
+    const records = [...this.processes.entries()].map(([id, managed]) => ({ id, ...managed }));
     mkdirSync(path.dirname(this.stateFile), { recursive: true });
     const temporaryPath = `${this.stateFile}.${process.pid}.tmp`;
     writeFileSync(temporaryPath, `${JSON.stringify(records, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
     renameSync(temporaryPath, this.stateFile);
+  }
+
+  async #tmux(args) {
+    try {
+      return await execFileAsync(this.tmuxPath, this.#tmuxArguments(args));
+    } catch (error) {
+      const detail = error.code === 'ENOENT' ? `${this.tmuxPath} is not installed`
+        : (error.stderr || error.message).trim();
+      throw new Error(detail, { cause: error });
+    }
+  }
+
+  #tmuxSync(args, options) {
+    return spawnSync(this.tmuxPath, this.#tmuxArguments(args), options);
+  }
+
+  #tmuxQuery(args, options) {
+    const result = this.#tmuxSync(args, options);
+    if (result.error) {
+      const detail = result.error.code === 'ENOENT' ? `${this.tmuxPath} is not installed` : result.error.message;
+      throw new Error(`Could not query tmux: ${detail}`, { cause: result.error });
+    }
+    if (result.status === 0) return result;
+    const detail = (result.stderr || '').trim();
+    if (/can't find|no server running|no such file or directory/i.test(detail)) return null;
+    throw new Error(`Could not query tmux: ${detail || `exit code ${result.status}`}`);
+  }
+
+  #tmuxArguments(args) {
+    return this.tmuxSocketName ? ['-L', this.tmuxSocketName, ...args] : args;
   }
 
   #acquireStateLock() {

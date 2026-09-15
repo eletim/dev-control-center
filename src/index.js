@@ -7,7 +7,10 @@ const host = process.env.HOST || '127.0.0.1';
 const port = Number(process.env.PORT || 3000);
 const dataFile = path.resolve(process.env.DCC_DATA_FILE || '.data/projects.json');
 const processFile = path.resolve(process.env.DCC_PROCESS_FILE || `${dataFile}.processes`);
-const processManager = new ProjectProcessManager({ stateFile: processFile });
+const processManager = new ProjectProcessManager({
+  stateFile: processFile,
+  sessionName: process.env.DCC_TMUX_SESSION || 'dev-control-center',
+});
 const server = createAppServer(new ProjectStore(dataFile), processManager);
 
 let shuttingDown = false;

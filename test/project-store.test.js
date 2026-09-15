@@ -61,6 +61,31 @@ test('serializes a concurrent update and delete without duplicating records', as
   assert.deepEqual(await new ProjectStore(dataFile).list(), expected);
 });
 
+test('holds mutations behind a stable project snapshot', async () => {
+  const { directory, projectPath, dataFile } = await fixture();
+  const secondPath = path.join(directory, 'second-project');
+  await mkdir(secondPath);
+  const store = new ProjectStore(dataFile);
+  const first = await store.create({ path: projectPath, startCommand: 'first' });
+
+  let releaseSnapshot;
+  const snapshot = store.withProjectSnapshot(async (projects) => {
+    assert.deepEqual(projects, [first]);
+    projects[0].startCommand = 'changed snapshot';
+    await new Promise((resolve) => { releaseSnapshot = resolve; });
+  });
+  const create = store.create({ path: secondPath, startCommand: 'second' });
+  let createFinished = false;
+  create.then(() => { createFinished = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(createFinished, false);
+
+  releaseSnapshot();
+  await Promise.all([snapshot, create]);
+  assert.deepEqual((await store.list()).map(({ path: project }) => project), [projectPath, secondPath]);
+  assert.equal((await store.get(first.id)).startCommand, 'first');
+});
+
 test('failed writes do not publish state and do not prevent later writes', async () => {
   const { directory, projectPath, dataFile } = await fixture();
   const store = new ProjectStore(dataFile);
