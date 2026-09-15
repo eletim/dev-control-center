@@ -3,8 +3,8 @@ import { createServer } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  fetchRepository, GitActionManager, listBranches, listWorktrees, removeWorktree,
-  switchBranch, updateRepository,
+  fetchRepository, GitActionManager, listBranches, listWorktrees, previewWorktreeRemoval, removeAllWorktrees,
+  removeWorktree, switchBranch, updateRepository,
 } from './git-actions.js';
 import { getGitMetadata } from './git-metadata.js';
 import { ProjectProcessManager } from './project-process-manager.js';
@@ -57,6 +57,7 @@ export function createAppServer(
       const match = url.pathname.match(/^\/api\/projects\/([^/]+)$/);
       const actionMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/(start|stop|restart)$/);
       const gitActionMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/git\/(branches|fetch|update|switch)$/);
+      const bulkWorktreeMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/git\/worktrees\/removal$/);
       const worktreeMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/git\/worktrees$/);
 
       if (request.method === 'GET' && url.pathname === '/api/projects') {
@@ -101,6 +102,25 @@ export function createAppServer(
           sendJson(response, 200, await present(project, processManager));
           return;
         }
+      }
+
+      if (bulkWorktreeMatch && (request.method === 'GET' || request.method === 'POST')) {
+        const id = decodeURIComponent(bulkWorktreeMatch[1]);
+        const input = request.method === 'POST' ? await readJson(request) : null;
+        const result = await processManager.withProjectLock(id, async () => {
+          const project = await store.get(id);
+          if (!project) throw new ProjectError('not_found', 'Project not found.');
+          return gitActionManager.withRepositoryLock(project.path, () => (
+            store.withProjectSnapshot((projects) => {
+              const protectedPaths = projects.map((candidate) => candidate.path);
+              return request.method === 'GET'
+                ? previewWorktreeRemoval(project.path, protectedPaths)
+                : removeAllWorktrees(project.path, input?.paths, protectedPaths);
+            })
+          ));
+        });
+        sendJson(response, 200, result);
+        return;
       }
 
       if (worktreeMatch && (request.method === 'GET' || request.method === 'DELETE')) {

@@ -619,3 +619,35 @@ test('a failed repository refresh stays busy until a deferred sibling settles', 
   assert.equal(projects.children[1]['aria-busy'], 'false');
   assert.ok(findElement(projects.children[0], 'Git refresh failed: First refresh failed.'));
 });
+
+
+test('bulk worktree removal confirms the preview count and reports removed and retained paths', async () => {
+  const document = createTestDocument();
+  const project = { id: 'bulk', name: 'demo', path: '/demo', startCommand: 'npm start',
+    status: 'stopped', git: { isRepository: true, branch: 'main', clean: true } };
+  const requests = [];
+  const prompts = [];
+  let confirmed = false;
+  const fetchImpl = async (url, options = {}) => {
+    requests.push({ url, ...options });
+    if (url === '/api/projects') return jsonResponse([project]);
+    if (url.endsWith('/git/branches')) return jsonResponse({ branches: ['main'] });
+    if (url.endsWith('/git/worktrees')) return jsonResponse({ worktrees: [{ path: '/demo', branch: 'main' }] });
+    if (url.endsWith('/removal')) return jsonResponse(options.method === 'POST'
+      ? { removed: ['/topic'], retained: [{ path: '/demo', reason: 'Registered project' }] }
+      : { targets: [{ path: '/topic', branch: 'topic' }], retained: [{ path: '/demo', reason: 'Registered project' }] });
+    return jsonResponse(project);
+  };
+  await initDashboard(document, fetchImpl, (prompt) => { prompts.push(prompt); return confirmed; }).ready;
+  const projects = document.elements.get('projects');
+  await findElement(projects, 'Remove all worktrees').dispatch('click');
+  assert.equal(requests.some(({ method }) => method === 'POST'), false);
+  assert.match(prompts[0], /Remove 1 worktrees\?/);
+  assert.match(prompts[0], /Retained worktrees \(1\):\n\/demo: Registered project/);
+  confirmed = true;
+  await findElement(projects, 'Remove all worktrees').dispatch('click');
+  const removal = requests.find(({ method }) => method === 'POST');
+  assert.deepEqual(JSON.parse(removal.body), { paths: ['/topic'] });
+  assert.ok(findElement(projects, 'Removed 1 worktrees: /topic. Retained 1 worktrees: /demo: Registered project.'));
+  assert.equal(requests.filter(({ url }) => url.endsWith('/git/worktrees')).length, 2);
+});
