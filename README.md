@@ -10,7 +10,9 @@ Requires Node.js 20 or newer and tmux.
 ./start.sh
 ```
 
-Open <http://localhost:3000>. Set `HOST`, `PORT`, or `DCC_DATA_FILE` to change
+Open <http://localhost:8023>. The default `0.0.0.0` binding also accepts
+connections through the machine's Tailscale IPv4 address or MagicDNS name, for
+example `http://e-ryzen:8023`. Set `HOST`, `PORT`, or `DCC_DATA_FILE` to change
 the listening address, port, or persistent project data file. tmux window
 ownership is stored beside the project data by default; set `DCC_PROCESS_FILE`
 to change that location.
@@ -44,20 +46,20 @@ over values in `config.sh`, so one-off overrides continue to work:
 PORT=3100 ./start.sh
 ```
 
-The default `127.0.0.1` binding is local-only. To listen on a particular
-Tailscale address without exposing the service on every network interface, use:
+The default binding listens on every IPv4 interface so both local and Tailscale
+clients can connect. To restrict the service to the Tailscale interface, use:
 
 ```sh
-HOST="$(tailscale ip -4)" PORT=3000 ./start.sh
+HOST="$(tailscale ip -4)" ./start.sh
 ```
 
-Dev Control Center has no authentication or TLS. Only bind it to a trusted
-interface and restrict access with the host firewall and Tailscale policy. Avoid
-`HOST=0.0.0.0` unless every reachable network is trusted. Registered Start
-Commands run as the Dev Control Center user, and Git actions modify the selected
-repositories, so only register trusted paths and commands. Git branch switching
-and fast-forward updates require a clean working tree; the application never
-offers reset, force-push, or arbitrary Git command execution.
+Dev Control Center has no authentication or TLS. Restrict access with the host
+firewall and Tailscale policy; use `HOST=127.0.0.1` when remote access is not
+needed. Registered Start Commands run as the Dev Control Center user, and Git
+actions modify the selected repositories, so only register trusted paths and
+commands. Git branch switching and fast-forward updates require a clean working
+tree; the application never offers reset, force-push, or arbitrary Git command
+execution.
 
 ## Test
 
