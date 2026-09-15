@@ -334,3 +334,39 @@ test('rejects bare and non-bare repository main entries from linked projects', a
     assert.equal((await bareRemoval.json()).error, 'main_worktree');
   });
 });
+
+
+test('bulk removal API previews protections and rechecks changes after confirmation', async () => {
+  await withServer(async (baseUrl, projectPath) => {
+    await execFileAsync('git', ['-C', projectPath, 'config', 'user.name', 'Test']);
+    await execFileAsync('git', ['-C', projectPath, 'config', 'user.email', 'test@example.invalid']);
+    await execFileAsync('git', ['-C', projectPath, 'commit', '--allow-empty', '-m', 'initial']);
+    const linked = `${projectPath}-linked`;
+    const clean = `${projectPath}-clean`;
+    await execFileAsync('git', ['-C', projectPath, 'worktree', 'add', '-b', 'linked', linked]);
+    await execFileAsync('git', ['-C', projectPath, 'worktree', 'add', '-b', 'clean', clean]);
+    const created = await fetch(`${baseUrl}/api/projects`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: projectPath, startCommand: 'node app.js' }),
+    });
+    const project = await created.json();
+    const url = `${baseUrl}/api/projects/${project.id}/git/worktrees/removal`;
+    const previewResponse = await fetch(url);
+    assert.equal(previewResponse.status, 200);
+    const preview = await previewResponse.json();
+    assert.equal(preview.targets.length, 2);
+    assert.equal(preview.retained[0].path, projectPath);
+    await writeFile(path.join(linked, 'local.txt'), 'keep');
+    const response = await fetch(url, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ paths: preview.targets.map(({ path }) => path) }),
+    });
+    assert.equal(response.status, 200);
+    const result = await response.json();
+    assert.deepEqual(result.removed, [clean]);
+    assert.equal(result.retained.length, 2);
+    assert.match(result.retained.find(({ path }) => path === linked).reason, /clean/);
+    const invalid = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+    assert.equal(invalid.status, 400);
+  });
+});

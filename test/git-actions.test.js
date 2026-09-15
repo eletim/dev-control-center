@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { access, chmod, mkdir, mkdtemp, unlink, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, mkdtemp, rm, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';
 import {
-  fetchRepository, GitActionManager, listBranches, listWorktrees, removeWorktree,
-  switchBranch, updateRepository,
+  fetchRepository, GitActionManager, listBranches, listWorktrees, previewWorktreeRemoval, removeAllWorktrees,
+  removeWorktree, switchBranch, updateRepository,
 } from '../src/git-actions.js';
 
 const execFileAsync = promisify(execFile);
@@ -290,4 +290,77 @@ test('serializes nested project paths by canonical Git repository identity', asy
   releaseFirst();
   await Promise.all([first, second]);
   assert.equal(secondStarted, true);
+});
+
+
+test('preserves locks with and without reasons in native and legacy worktree listings', async (t) => {
+  const repository = await createRepository();
+  const paths = ['no-reason', 'with-reason'].map((name) => `${repository}-${name}`);
+  t.after(() => Promise.all([repository, ...paths].map((directory) => rm(directory, { recursive: true, force: true }))));
+  for (const [index, worktree] of paths.entries()) {
+    await git(repository, 'worktree', 'add', '-b', `locked-${index}`, worktree);
+    await git(repository, 'worktree', 'lock', ...(index ? ['--reason', 'keep\nthis checkout'] : []), worktree);
+  }
+  const originalPath = process.env.PATH;
+  const realGit = (await execFileAsync('sh', ['-c', 'command -v git'])).stdout.trim();
+  const wrapperDirectory = await mkdtemp(path.join(os.tmpdir(), 'dcc-legacy-git-'));
+  t.after(() => rm(wrapperDirectory, { recursive: true, force: true }));
+  const wrapper = path.join(wrapperDirectory, 'git');
+  await writeFile(wrapper, `#!/bin/sh\nfor arg in "$@"; do\n  if [ "$arg" = "-z" ]; then exit 129; fi\ndone\nexec '${realGit.replaceAll("'", "'\\''")}' "$@"\n`);
+  await chmod(wrapper, 0o755);
+  try {
+    for (const legacy of [false, true]) {
+      process.env.PATH = legacy ? `${wrapperDirectory}:${originalPath}` : originalPath;
+      const worktrees = await listWorktrees(repository);
+      for (const [index, worktreePath] of paths.entries()) {
+        const worktree = worktrees.find(({ path }) => path === worktreePath);
+        assert.equal(worktree.locked, true);
+        assert.equal(worktree.lockReason, index ? 'keep\nthis checkout' : '');
+        await assert.rejects(removeWorktree(repository, worktreePath), { code: 'locked_worktree' });
+        await access(worktreePath);
+      }
+      const preview = await previewWorktreeRemoval(repository);
+      assert.deepEqual(preview.targets, []);
+      assert.ok(preview.retained.filter(({ locked }) => locked).every(({ reason }) => /locked/.test(reason)));
+    }
+  } finally {
+    process.env.PATH = originalPath;
+  }
+});
+
+test('bulk removal previews safe targets and rechecks dirty and registered worktrees', async () => {
+  const repository = await createRepository();
+  const paths = {};
+  for (const branch of ['project', 'clean', 'dirty', 'changed', 'registered', 'locked']) {
+    paths[branch] = `${repository}-${branch}`;
+    await git(repository, 'branch', branch);
+    await git(repository, 'worktree', 'add', paths[branch], branch);
+  }
+  const nested = path.join(paths.registered, 'nested');
+  await mkdir(nested);
+  await writeFile(path.join(paths.dirty, 'README.md'), 'modified');
+  await git(repository, 'worktree', 'lock', '--reason', 'keep this checkout', paths.locked);
+  const preview = await previewWorktreeRemoval(paths.project, [nested]);
+  assert.deepEqual(preview.targets.map(({ path }) => path).sort(),
+    [paths.clean, paths.changed].sort());
+  assert.deepEqual(preview.retained.map(({ path }) => path).sort(),
+    [repository, paths.project, paths.dirty, paths.registered, paths.locked].sort());
+  assert.ok(preview.retained.every(({ reason }) => reason));
+  const locked = preview.retained.find(({ path }) => path === paths.locked);
+  assert.equal(locked.locked, true);
+  assert.equal(locked.lockReason, 'keep this checkout');
+  assert.match(locked.reason, /locked: keep this checkout/);
+  await writeFile(path.join(paths.changed, 'untracked.txt'), 'keep me');
+  const result = await removeAllWorktrees(paths.project,
+    [paths.locked, ...preview.targets.map(({ path }) => path), repository, paths.project, paths.registered], [nested]);
+  assert.deepEqual(result.removed, [paths.clean]);
+  await assert.rejects(access(paths.clean), { code: 'ENOENT' });
+  assert.equal(result.retained.length, 6);
+  for (const worktree of result.retained) {
+    await access(worktree.path);
+    assert.ok(worktree.reason);
+  }
+  assert.match(result.retained.find(({ path }) => path === paths.changed).reason, /clean/);
+  assert.match(result.retained.find(({ path }) => path === paths.locked).reason, /locked/);
+  await assert.rejects(removeAllWorktrees(repository, undefined), { code: 'invalid_input' });
 });
