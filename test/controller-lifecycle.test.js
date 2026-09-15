@@ -31,8 +31,8 @@ function spawnController(dataFile, processFile, sessionName) {
     cwd: repositoryPath,
     env: {
       ...process.env,
-      HOST: '127.0.0.1',
-      PORT: '0',
+      DCC_HOST: '127.0.0.1',
+      DCC_PORT: '0',
       DCC_DATA_FILE: dataFile,
       DCC_PROCESS_FILE: processFile,
       DCC_TMUX_SESSION: sessionName,
