@@ -80,3 +80,16 @@ test('--configure creates a config from interactive answers before starting', as
   assert.match(stdout, /host:localhost/);
   assert.match(stdout, /port:4200/);
 });
+
+test('--configure uses the public listen address and port 8023 by default', async (t) => {
+  const fixture = await launcherFixture(t);
+  const { stdout } = await runWithInput(path.join(fixture.root, 'start.sh'), ['--configure'], {
+    env: fixture.env,
+  }, '\n\n');
+
+  const config = await readFile(path.join(fixture.root, 'config.sh'), 'utf8');
+  assert.match(config, /HOST="\$\{HOST:-0\.0\.0\.0\}"/);
+  assert.match(config, /PORT="\$\{PORT:-8023\}"/);
+  assert.match(stdout, /host:0\.0\.0\.0/);
+  assert.match(stdout, /port:8023/);
+});
