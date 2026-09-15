@@ -1,3 +1,4 @@
 .data/
+config.sh
 node_modules/
 *.log

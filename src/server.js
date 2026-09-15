@@ -127,6 +127,7 @@ export function createAppServer(
           if (processManager.isRunning(id)) {
             throw new ProjectError('project_running', 'Stop the project before deleting it.');
           }
+          await processManager.remove(id);
           await store.delete(id);
         });
         response.writeHead(204);
