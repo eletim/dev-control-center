@@ -27,11 +27,16 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .git-state { margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid #2a3242; }
 .git-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
 .git-heading h4 { margin: 0; }
+.git-state h5 { margin: 1rem 0 .5rem; font-size: .9rem; }
 button.compact { padding: .45rem .7rem; }
 .git-metadata { display: grid; grid-template-columns: max-content 1fr; gap: .35rem 1rem; margin: .8rem 0; font-size: .9rem; }
 .git-metadata dt { color: #aeb7c7; }
 .git-metadata dd { margin: 0; overflow-wrap: anywhere; }
 .branch-controls { display: grid; grid-template-columns: minmax(12rem, 1fr) auto; gap: .5rem; align-items: end; }
+.worktree-list { display: grid; gap: .5rem; }
+.worktree-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .65rem; background: #141923; border-radius: 6px; }
+.worktree-metadata { margin: 0; min-width: 0; }
+.worktree-row button { flex: 0 0 auto; }
 .inline-message, .project-message { margin: .7rem 0 0; }
 .error { color: #ffacac; }
 .success { color: #9ef0cb; }
@@ -39,4 +44,6 @@ button.compact { padding: .45rem .7rem; }
 @media (max-width: 650px) {
   form, .branch-controls { grid-template-columns: 1fr; }
   .branch-controls button { justify-self: start; }
+  .worktree-row { align-items: stretch; flex-direction: column; }
+  .worktree-row button { align-self: start; }
 }

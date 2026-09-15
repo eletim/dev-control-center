@@ -78,10 +78,42 @@ function findElement(root, text) {
   return null;
 }
 
+function findElements(root, text) {
+  const matches = root.textContent === text ? [root] : [];
+  for (const child of root.children) matches.push(...findElements(child, text));
+  return matches;
+}
+
+function findTag(root, tagName) {
+  if (root.tagName === tagName.toUpperCase()) return root;
+  for (const child of root.children) {
+    const match = findTag(child, tagName);
+    if (match) return match;
+  }
+  return null;
+}
+
+function findWorktreeRow(root, worktreePath) {
+  if (root.className === 'worktree-row' && findElement(root, worktreePath)) return root;
+  for (const child of root.children) {
+    const match = findWorktreeRow(child, worktreePath);
+    if (match) return match;
+  }
+  return null;
+}
+
 function deferred() {
   let resolve;
   const promise = new Promise((resolvePromise) => { resolve = resolvePromise; });
   return { promise, resolve };
+}
+
+async function waitFor(predicate, timeout = 2000) {
+  const deadline = Date.now() + timeout;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('Timed out waiting for dashboard state.');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }
 
 function jsonResponse(body, status = 200) {
@@ -162,6 +194,11 @@ test('a deferred full refresh blocks save, delete, lifecycle, and Git submission
     if (url.endsWith('/git/branches')) {
       return Promise.resolve(jsonResponse({ branches: ['main', 'topic'] }));
     }
+    if (url.endsWith('/git/worktrees')) {
+      return Promise.resolve(jsonResponse({
+        worktrees: [{ path: project.path, branch: 'main' }],
+      }));
+    }
     return Promise.resolve(jsonResponse(project));
   };
   let confirmations = 0;
@@ -193,6 +230,7 @@ test('a deferred full refresh blocks save, delete, lifecycle, and Git submission
   assert.deepEqual(requests.map(({ url, method }) => `${method} ${url}`), [
     'GET /api/projects',
     'GET /api/projects/project-1/git/branches',
+    'GET /api/projects/project-1/git/worktrees',
     'GET /api/projects',
   ]);
 
@@ -228,6 +266,12 @@ test('pending actions block duplicates only for the affected project', async () 
     if (url === '/api/projects') return Promise.resolve(jsonResponse([first, second]));
     if (url.endsWith('/git/branches')) {
       return Promise.resolve(jsonResponse({ branches: ['main', 'topic'] }));
+    }
+    if (url.endsWith('/git/worktrees')) {
+      const project = url.includes('/project-1') ? first : second;
+      return Promise.resolve(jsonResponse({
+        worktrees: [{ path: project.path, branch: 'main' }],
+      }));
     }
     if (method === 'POST' && url === '/api/projects/project-1/start') {
       return firstActionResponse.promise;
@@ -270,4 +314,308 @@ test('pending actions block duplicates only for the affected project', async () 
   await firstAction;
   assert.equal(findElement(projects.children[0], 'Running').textContent, 'Running');
   assert.equal(document.elements.get('refresh').disabled, false);
+});
+
+test('lists worktrees and removes one only after confirmation before refreshing Git state', async () => {
+  const document = createTestDocument();
+  const project = {
+    id: 'project-1',
+    name: 'demo',
+    path: '/projects/demo',
+    startCommand: 'npm start',
+    status: 'stopped',
+    git: {
+      isRepository: true,
+      branch: 'main',
+      clean: true,
+      remote: null,
+      ahead: null,
+      behind: null,
+    },
+  };
+  const linkedPath = '/projects/demo-topic';
+  let linkedExists = true;
+  let confirmed = false;
+  const confirmations = [];
+  const requests = [];
+  const fetchImpl = (url, options = {}) => {
+    const method = options.method ?? 'GET';
+    requests.push({ url, method, body: options.body });
+    if (url === '/api/projects') return Promise.resolve(jsonResponse([project]));
+    if (url.endsWith('/git/branches')) {
+      return Promise.resolve(jsonResponse({ branches: ['main', 'topic'] }));
+    }
+    if (url.endsWith('/git/worktrees') && method === 'GET') {
+      return Promise.resolve(jsonResponse({
+        worktrees: [
+          { path: project.path, branch: 'main' },
+          ...(linkedExists ? [{ path: linkedPath, branch: 'topic' }] : []),
+        ],
+      }));
+    }
+    if (url.endsWith('/git/worktrees') && method === 'DELETE') {
+      linkedExists = false;
+      return Promise.resolve(jsonResponse(null, 204));
+    }
+    return Promise.resolve(jsonResponse(project));
+  };
+  const dashboard = initDashboard(document, fetchImpl, (prompt) => {
+    confirmations.push(prompt);
+    return confirmed;
+  });
+  await dashboard.ready;
+
+  const projects = document.elements.get('projects');
+  assert.ok(findElement(projects, project.path));
+  assert.ok(findElement(projects, linkedPath));
+  assert.equal(findElements(projects, 'Branch').length, 3);
+  assert.ok(findElement(projects, 'main'));
+  assert.ok(findElement(projects, 'topic'));
+  assert.equal(findElements(projects, 'Remove Worktree').length, 1);
+
+  await findElement(projects, 'Remove Worktree').dispatch('click');
+  assert.equal(requests.filter(({ method }) => method === 'DELETE').length, 0);
+  assert.deepEqual(confirmations, [
+    `Remove worktree at ${linkedPath} (topic)? Branch Switch will not run automatically.`,
+  ]);
+
+  confirmed = true;
+  await findElement(projects, 'Remove Worktree').dispatch('click');
+  const removal = requests.find(({ method }) => method === 'DELETE');
+  assert.equal(removal.url, '/api/projects/project-1/git/worktrees');
+  assert.deepEqual(JSON.parse(removal.body), { path: linkedPath });
+  assert.equal(findElement(projects, linkedPath), null);
+  assert.ok(findElement(projects, project.path));
+  assert.ok(findElement(projects, 'Remove worktree complete. Retry Branch Switch explicitly if needed.'));
+  assert.equal(requests.filter(({ url }) => url.endsWith('/git/branches')).length, 2);
+  assert.equal(requests.filter(({ url, method }) => method === 'GET' && url.endsWith('/git/worktrees')).length, 2);
+  assert.equal(requests.some(({ url }) => url.includes('/git/switch')), false);
+});
+
+test('Git actions and worktree removal refresh every project from the same repository', async () => {
+  const document = createTestDocument();
+  const identity = '/projects/demo/.git';
+  const mainPath = '/projects/demo';
+  const linkedPath = '/projects/demo-linked';
+  const removablePath = '/projects/demo-removable';
+  let mainBranch = 'main';
+  let removableExists = true;
+  const makeProject = (id, name, projectPath, branch, repositoryIdentity = identity) => ({
+    id,
+    name,
+    path: projectPath,
+    startCommand: 'npm start',
+    status: 'stopped',
+    git: {
+      isRepository: true,
+      repositoryIdentity,
+      branch,
+      clean: true,
+      remote: null,
+      ahead: null,
+      behind: null,
+    },
+  });
+  const currentProjects = () => [
+    makeProject('main', 'demo', mainPath, mainBranch),
+    makeProject('linked', 'demo-linked', linkedPath, 'linked'),
+    makeProject('unrelated', 'unrelated', '/projects/unrelated', 'main', '/projects/unrelated/.git'),
+  ];
+  const requests = [];
+  const fetchImpl = (url, options = {}) => {
+    const method = options.method ?? 'GET';
+    requests.push(`${method} ${url}`);
+    if (url === '/api/projects') return Promise.resolve(jsonResponse(currentProjects()));
+    if (method === 'POST' && url === '/api/projects/main/git/switch') {
+      mainBranch = 'topic';
+      return Promise.resolve(jsonResponse(currentProjects()[0]));
+    }
+    if (method === 'DELETE' && url === '/api/projects/main/git/worktrees') {
+      removableExists = false;
+      return Promise.resolve(jsonResponse(null, 204));
+    }
+    if (url.endsWith('/git/branches')) {
+      return Promise.resolve(jsonResponse({ branches: ['linked', 'main', 'topic'] }));
+    }
+    if (url.endsWith('/git/worktrees')) {
+      return Promise.resolve(jsonResponse({
+        worktrees: url.includes('/unrelated')
+          ? [{ path: '/projects/unrelated', branch: 'main' }]
+          : [
+            { path: mainPath, branch: mainBranch },
+            { path: linkedPath, branch: 'linked' },
+            ...(removableExists ? [{ path: removablePath, branch: 'removable' }] : []),
+          ],
+      }));
+    }
+    const id = url.split('/').at(-1);
+    return Promise.resolve(jsonResponse(currentProjects().find((project) => project.id === id)));
+  };
+
+  const dashboard = initDashboard(document, fetchImpl, () => true);
+  await dashboard.ready;
+  const projects = document.elements.get('projects');
+  let mainCard = projects.children[0];
+  let linkedCard = projects.children[1];
+  const unrelatedRefreshesBefore = requests.filter((request) => request.includes('/unrelated')).length;
+
+  const select = findTag(mainCard, 'select');
+  select.value = 'topic';
+  await select.dispatch('change');
+  await findElement(mainCard, 'Switch').dispatch('click');
+
+  await waitFor(() => {
+    mainCard = projects.children[0];
+    return findElement(mainCard, 'Branch switch complete.');
+  });
+  mainCard = projects.children[0];
+  linkedCard = projects.children[1];
+  assert.ok(findElement(mainCard, 'Branch switch complete.'));
+  assert.ok(findElement(findWorktreeRow(linkedCard, mainPath), 'topic'));
+  assert.equal(requests.filter((request) => request === 'GET /api/projects/main').length, 1);
+  assert.equal(requests.filter((request) => request === 'GET /api/projects/linked').length, 1);
+  assert.equal(requests.filter((request) => request.includes('/unrelated')).length, unrelatedRefreshesBefore);
+
+  const removableButton = findElements(mainCard, 'Remove Worktree').at(-1);
+  await removableButton.dispatch('click');
+
+  mainCard = projects.children[0];
+  linkedCard = projects.children[1];
+  assert.equal(findElement(mainCard, removablePath), null);
+  assert.equal(findElement(linkedCard, removablePath), null);
+  assert.equal(requests.filter((request) => request === 'GET /api/projects/main').length, 2);
+  assert.equal(requests.filter((request) => request === 'GET /api/projects/linked').length, 2);
+  assert.equal(requests.filter((request) => request.includes('/unrelated')).length, unrelatedRefreshesBefore);
+});
+
+test('a deferred repository refresh blocks related actions that could supersede its responses', async () => {
+  const document = createTestDocument();
+  const identity = '/projects/shared/.git';
+  const makeProject = (id, name) => ({
+    id,
+    name,
+    path: `/projects/${name}`,
+    startCommand: 'npm start',
+    status: 'stopped',
+    git: {
+      isRepository: true,
+      repositoryIdentity: identity,
+      branch: name,
+      clean: true,
+      remote: null,
+      ahead: null,
+      behind: null,
+    },
+  });
+  const first = makeProject('first', 'main');
+  const second = makeProject('second', 'linked');
+  const staleSecondRefresh = deferred();
+  const requests = [];
+  const fetchImpl = (url, options = {}) => {
+    const method = options.method ?? 'GET';
+    requests.push(`${method} ${url}`);
+    if (url === '/api/projects') return Promise.resolve(jsonResponse([first, second]));
+    if (url.endsWith('/git/branches')) {
+      return Promise.resolve(jsonResponse({ branches: ['linked', 'main'] }));
+    }
+    if (url.endsWith('/git/worktrees')) {
+      return Promise.resolve(jsonResponse({
+        worktrees: [
+          { path: first.path, branch: 'main' },
+          { path: second.path, branch: 'linked' },
+        ],
+      }));
+    }
+    if (method === 'GET' && url === '/api/projects/first') {
+      return Promise.resolve(jsonResponse(first));
+    }
+    if (method === 'GET' && url === '/api/projects/second') return staleSecondRefresh.promise;
+    if (method === 'POST' && url === '/api/projects/second/start') {
+      return Promise.resolve(jsonResponse({ ...second, status: 'running' }));
+    }
+    throw new Error(`Unexpected request: ${method} ${url}`);
+  };
+
+  const dashboard = initDashboard(document, fetchImpl, () => true);
+  await dashboard.ready;
+  const projects = document.elements.get('projects');
+  const refreshRun = findElement(projects.children[0], 'Refresh Git').dispatch('click');
+  await waitFor(() => requests.includes('GET /api/projects/second'));
+
+  const relatedCard = projects.children[1];
+  assert.equal(relatedCard['aria-busy'], 'true');
+  assert.equal(findElement(relatedCard, 'Start').disabled, true);
+  await findElement(relatedCard, 'Start').dispatch('click');
+  assert.equal(requests.includes('POST /api/projects/second/start'), false);
+
+  staleSecondRefresh.resolve(jsonResponse(second));
+  await refreshRun;
+  assert.equal(projects.children[1]['aria-busy'], 'false');
+  assert.ok(findElement(projects.children[1], 'Stopped'));
+});
+
+test('a failed repository refresh stays busy until a deferred sibling settles', async () => {
+  const document = createTestDocument();
+  const identity = '/projects/shared/.git';
+  const makeProject = (id, name) => ({
+    id,
+    name,
+    path: `/projects/${name}`,
+    startCommand: 'npm start',
+    status: 'stopped',
+    git: {
+      isRepository: true,
+      repositoryIdentity: identity,
+      branch: name,
+      clean: true,
+      remote: null,
+      ahead: null,
+      behind: null,
+    },
+  });
+  const first = makeProject('first', 'main');
+  const second = makeProject('second', 'linked');
+  const deferredSecondRefresh = deferred();
+  const requests = [];
+  const fetchImpl = (url, options = {}) => {
+    const method = options.method ?? 'GET';
+    requests.push(`${method} ${url}`);
+    if (url === '/api/projects') return Promise.resolve(jsonResponse([first, second]));
+    if (url.endsWith('/git/branches')) {
+      return Promise.resolve(jsonResponse({ branches: ['linked', 'main'] }));
+    }
+    if (url.endsWith('/git/worktrees')) {
+      return Promise.resolve(jsonResponse({
+        worktrees: [
+          { path: first.path, branch: 'main' },
+          { path: second.path, branch: 'linked' },
+        ],
+      }));
+    }
+    if (method === 'GET' && url === '/api/projects/first') {
+      return Promise.resolve(jsonResponse({ message: 'First refresh failed.' }, 500));
+    }
+    if (method === 'GET' && url === '/api/projects/second') return deferredSecondRefresh.promise;
+    if (method === 'POST' && url === '/api/projects/second/start') {
+      return Promise.resolve(jsonResponse({ ...second, status: 'running' }));
+    }
+    throw new Error(`Unexpected request: ${method} ${url}`);
+  };
+
+  const dashboard = initDashboard(document, fetchImpl, () => true);
+  await dashboard.ready;
+  const projects = document.elements.get('projects');
+  const refreshRun = findElement(projects.children[0], 'Refresh Git').dispatch('click');
+  await waitFor(() => requests.includes('GET /api/projects/second'));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const relatedCard = projects.children[1];
+  assert.equal(relatedCard['aria-busy'], 'true');
+  await findElement(relatedCard, 'Start').dispatch('click');
+  assert.equal(requests.includes('POST /api/projects/second/start'), false);
+
+  deferredSecondRefresh.resolve(jsonResponse(second));
+  await refreshRun;
+  assert.equal(projects.children[1]['aria-busy'], 'false');
+  assert.ok(findElement(projects.children[0], 'Git refresh failed: First refresh failed.'));
 });

@@ -175,7 +175,7 @@ async function conflictingWorktree(repositoryPath, branch) {
   return null;
 }
 
-async function repositoryIdentity(repositoryPath) {
+export async function repositoryIdentity(repositoryPath) {
   await requireRepository(repositoryPath);
   try {
     const commonDirectory = await git(repositoryPath, [

@@ -80,6 +80,21 @@ function findElement(root, text) {
   return null;
 }
 
+function findElements(root, text) {
+  const matches = root.textContent === text ? [root] : [];
+  for (const child of root.children) matches.push(...findElements(child, text));
+  return matches;
+}
+
+function findWorktreeRow(root, worktreePath) {
+  if (root.className === 'worktree-row' && findElement(root, worktreePath)) return root;
+  for (const child of root.children) {
+    const match = findWorktreeRow(child, worktreePath);
+    if (match) return match;
+  }
+  return null;
+}
+
 function findTag(root, tagName) {
   if (root.tagName === tagName.toUpperCase()) return root;
   for (const child of root.children) {
@@ -90,7 +105,7 @@ function findTag(root, tagName) {
 }
 
 function findProject(document, name) {
-  return document.elements.get('projects').children.find((card) => findElement(card, name));
+  return document.elements.get('projects').children.find((card) => card.children[0]?.textContent === name);
 }
 
 async function waitFor(predicate, timeout = 2000) {
@@ -132,6 +147,80 @@ async function initializeRemoteRepository(directory, checkoutPath) {
   await execFileAsync('git', ['-C', checkoutPath, 'branch', 'topic']);
   return sourcePath;
 }
+
+test('shared-repository project cards refresh after Git actions and worktree removal', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'dcc-shared-repository-'));
+  const mainPath = path.join(directory, 'main');
+  const linkedPath = path.join(directory, 'linked');
+  const removablePath = path.join(directory, 'removable');
+  const processManager = new ProjectProcessManager({
+    sessionName: `dcc-shared-repository-test-${process.pid}`,
+  });
+  const server = createAppServer(
+    new ProjectStore(path.join(directory, 'projects.json')),
+    processManager,
+  );
+
+  try {
+    await initializeRepository(mainPath);
+    await execFileAsync('git', ['-C', mainPath, 'branch', 'linked']);
+    await execFileAsync('git', ['-C', mainPath, 'branch', 'removable']);
+    await execFileAsync('git', ['-C', mainPath, 'worktree', 'add', '-q', linkedPath, 'linked']);
+    await execFileAsync('git', ['-C', mainPath, 'worktree', 'add', '-q', removablePath, 'removable']);
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const baseUrl = `http://127.0.0.1:${server.address().port}`;
+    const document = createDocument();
+    const dashboard = initDashboard(
+      document,
+      (url, options) => fetch(new URL(url, baseUrl), options),
+      () => true,
+    );
+    await dashboard.ready;
+
+    for (const projectPath of [mainPath, linkedPath]) {
+      document.elements.get('path').value = projectPath;
+      document.elements.get('start-command').value = 'node app.js';
+      await document.elements.get('project-form').dispatch('submit');
+    }
+
+    let mainCard = findProject(document, 'main');
+    let linkedCard = findProject(document, 'linked');
+    assert.ok(findElement(mainCard, removablePath));
+    assert.ok(findElement(linkedCard, removablePath));
+
+    await findElements(mainCard, 'Remove Worktree').at(-1).dispatch('click');
+    mainCard = findProject(document, 'main');
+    linkedCard = findProject(document, 'linked');
+    assert.equal(findElement(mainCard, removablePath), null);
+    assert.equal(findElement(linkedCard, removablePath), null);
+
+    const branchSelect = findTag(mainCard, 'select');
+    branchSelect.value = 'topic';
+    await branchSelect.dispatch('change');
+    await findElement(mainCard, 'Switch').dispatch('click');
+
+    await waitFor(() => {
+      mainCard = findProject(document, 'main');
+      linkedCard = findProject(document, 'linked');
+      return mainCard['aria-busy'] === 'false'
+        && findElement(mainCard, 'Branch switch complete.')
+        && findWorktreeRow(linkedCard, mainPath);
+    });
+    mainCard = findProject(document, 'main');
+    linkedCard = findProject(document, 'linked');
+    assert.ok(findElement(mainCard, 'Branch switch complete.'));
+    const mainWorktreeRow = findWorktreeRow(linkedCard, mainPath);
+    assert.ok(mainWorktreeRow);
+    assert.ok(findElement(mainWorktreeRow, 'topic'));
+    assert.equal((await execFileAsync('git', ['-C', mainPath, 'branch', '--show-current'])).stdout.trim(), 'topic');
+  } finally {
+    await processManager.stopAll();
+    if (server.listening) {
+      await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test('multiple projects complete dashboard lifecycle and safe Git workflows over HTTP', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'dcc-acceptance-'));
@@ -212,6 +301,37 @@ test('multiple projects complete dashboard lifecycle and safe Git workflows over
       .then(({ stdout }) => stdout.trim()), '?? local-change.txt');
 
     await unlink(path.join(secondPath, 'local-change.txt'));
+    const topicWorktree = `${secondPath}-topic-worktree`;
+    await execFileAsync('git', ['-C', secondPath, 'worktree', 'add', '-q', topicWorktree, 'topic']);
+    await findElement(secondCard, 'Refresh Git').dispatch('click');
+    secondCard = findProject(document, 'second-project');
+    assert.ok(findElement(secondCard, topicWorktree));
+    assert.ok(findElement(secondCard, 'Remove Worktree'));
+
+    branchSelect = findTag(secondCard, 'select');
+    branchSelect.value = 'topic';
+    await branchSelect.dispatch('change');
+    await findElement(secondCard, 'Switch').dispatch('click');
+
+    await waitFor(() => {
+      secondCard = findProject(document, 'second-project');
+      return findElement(
+        secondCard,
+        `Branch switch refused: Branch is checked out in another worktree: ${topicWorktree}`,
+      ) && secondCard['aria-busy'] === 'false';
+    });
+    assert.ok(findElement(secondCard, topicWorktree));
+    assert.equal((await execFileAsync('git', ['-C', secondPath, 'branch', '--show-current'])).stdout.trim(), 'main');
+
+    await findElement(secondCard, 'Remove Worktree').dispatch('click');
+    secondCard = findProject(document, 'second-project');
+    assert.ok(findElement(secondCard, 'Remove worktree complete. Retry Branch Switch explicitly if needed.'));
+    assert.equal(findElement(secondCard, topicWorktree), null);
+    assert.ok(findElement(secondCard, secondPath));
+    assert.equal((await fetch(`${baseUrl}/api/projects/${projects.find(({ name }) => name === 'second-project').id}`)
+      .then((response) => response.json())).path, secondPath);
+    assert.equal((await execFileAsync('git', ['-C', secondPath, 'branch', '--show-current'])).stdout.trim(), 'main');
+
     branchSelect = findTag(secondCard, 'select');
     branchSelect.value = 'topic';
     await branchSelect.dispatch('change');
