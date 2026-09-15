@@ -173,6 +173,8 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
     worktreeHeading.textContent = 'Worktrees';
     section.append(worktreeHeading);
     if (worktreeState?.status === 'ready') {
+      section.append(makeButton('Remove all worktrees', 'secondary compact', busy,
+        () => removeAllProjectWorktrees(project)));
       const worktreeList = documentObject.createElement('div');
       worktreeList.className = 'worktree-list';
       for (const worktree of worktreeState.worktrees) {
@@ -413,6 +415,39 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
       const existing = projectMessages.get(project.id);
       projectMessages.set(project.id, {
         text: `${existing?.text || 'Remove worktree finished.'} State refresh failed: ${error.message}`,
+        error: true,
+      });
+    } finally {
+      for (const { id } of affectedProjects) pendingProjects.delete(id);
+      render();
+      await reconcileProjectsWhenIdle();
+    }
+  }
+
+  async function removeAllProjectWorktrees(project) {
+    const affectedProjects = projectsSharingRepository(project);
+    if (projectsAreBusy(affectedProjects)) return;
+    for (const { id } of affectedProjects) pendingProjects.add(id);
+    render();
+    try {
+      const url = `/api/projects/${encodeURIComponent(project.id)}/git/worktrees/removal`;
+      const preview = await requestJson(url, {}, fetchImpl);
+      const retainedText = preview.retained.map(({ path, reason }) => `${path}: ${reason}`).join('\n');
+      if (!confirmImpl(`Remove ${preview.targets.length} worktrees?\n${preview.targets.map(({ path }) => path).join('\n')}\nRetained worktrees (${preview.retained.length}):\n${retainedText}`)) return;
+      const result = await requestJson(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ paths: preview.targets.map(({ path }) => path) }),
+      }, fetchImpl);
+      projectMessages.set(project.id, {
+        text: `Removed ${result.removed.length} worktrees: ${result.removed.join('; ') || 'None'}. Retained ${result.retained.length} worktrees: ${result.retained.map(({ path, reason }) => `${path}: ${reason}`).join('; ') || 'None'}.`,
+        error: false,
+      });
+      await refreshRepositoryProjects(affectedProjects);
+    } catch (error) {
+      const existing = projectMessages.get(project.id);
+      projectMessages.set(project.id, {
+        text: `${existing?.text || ''} ${actionError('Remove all worktrees', error)}`.trim(),
         error: true,
       });
     } finally {

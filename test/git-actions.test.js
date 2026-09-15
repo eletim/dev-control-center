@@ -6,8 +6,8 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';
 import {
-  fetchRepository, GitActionManager, listBranches, listWorktrees, removeWorktree,
-  switchBranch, updateRepository,
+  fetchRepository, GitActionManager, listBranches, listWorktrees, previewWorktreeRemoval, removeAllWorktrees,
+  removeWorktree, switchBranch, updateRepository,
 } from '../src/git-actions.js';
 
 const execFileAsync = promisify(execFile);
@@ -290,4 +290,38 @@ test('serializes nested project paths by canonical Git repository identity', asy
   releaseFirst();
   await Promise.all([first, second]);
   assert.equal(secondStarted, true);
+});
+
+
+test('bulk removal previews safe targets and rechecks dirty and registered worktrees', async () => {
+  const repository = await createRepository();
+  const paths = {};
+  for (const branch of ['project', 'clean', 'dirty', 'changed', 'registered', 'locked']) {
+    paths[branch] = `${repository}-${branch}`;
+    await git(repository, 'branch', branch);
+    await git(repository, 'worktree', 'add', paths[branch], branch);
+  }
+  const nested = path.join(paths.registered, 'nested');
+  await mkdir(nested);
+  await writeFile(path.join(paths.dirty, 'README.md'), 'modified');
+  await git(repository, 'worktree', 'lock', paths.locked);
+  const preview = await previewWorktreeRemoval(paths.project, [nested]);
+  assert.deepEqual(preview.targets.map(({ path }) => path).sort(),
+    [paths.clean, paths.changed, paths.locked].sort());
+  assert.deepEqual(preview.retained.map(({ path }) => path).sort(),
+    [repository, paths.project, paths.dirty, paths.registered].sort());
+  assert.ok(preview.retained.every(({ reason }) => reason));
+  await writeFile(path.join(paths.changed, 'untracked.txt'), 'keep me');
+  const result = await removeAllWorktrees(paths.project,
+    [paths.locked, ...preview.targets.map(({ path }) => path), repository, paths.project, paths.registered], [nested]);
+  assert.deepEqual(result.removed, [paths.clean]);
+  await assert.rejects(access(paths.clean), { code: 'ENOENT' });
+  assert.equal(result.retained.length, 6);
+  for (const worktree of result.retained) {
+    await access(worktree.path);
+    assert.ok(worktree.reason);
+  }
+  assert.match(result.retained.find(({ path }) => path === paths.changed).reason, /clean/);
+  assert.match(result.retained.find(({ path }) => path === paths.locked).reason, /safely remove/);
+  await assert.rejects(removeAllWorktrees(repository, undefined), { code: 'invalid_input' });
 });

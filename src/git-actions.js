@@ -229,7 +229,7 @@ export async function listWorktrees(repositoryPath) {
   }
 }
 
-export async function removeWorktree(repositoryPath, worktreePath, protectedPaths = []) {
+async function removableWorktree(repositoryPath, worktreePath, protectedPaths) {
   await requireRepository(repositoryPath);
   if (typeof worktreePath !== 'string' || !worktreePath) {
     throw new ProjectError('invalid_worktree', 'An existing worktree path is required.');
@@ -267,6 +267,13 @@ export async function removeWorktree(repositoryPath, worktreePath, protectedPath
   }
   await requireClean(worktree.canonicalPath);
 
+  return worktree;
+}
+
+export async function removeWorktree(repositoryPath, worktreePath, protectedPaths = []) {
+  let worktree = await removableWorktree(repositoryPath, worktreePath, protectedPaths);
+  const registeredPath = await worktreeRoot(repositoryPath);
+
   // Re-resolve the registration after checking cleanliness. Git performs its own
   // final dirty-worktree check, and removal is deliberately never forced.
   worktree = await findRegisteredWorktree(await listWorktrees(repositoryPath), worktree.canonicalPath);
@@ -278,6 +285,42 @@ export async function removeWorktree(repositoryPath, worktreePath, protectedPath
   } catch {
     throw new ProjectError('worktree_remove_failed', 'Could not safely remove the Git worktree.');
   }
+}
+
+export async function previewWorktreeRemoval(repositoryPath, protectedPaths = []) {
+  const targets = [];
+  const retained = [];
+  for (const worktree of await listWorktrees(repositoryPath)) {
+    try {
+      await removableWorktree(repositoryPath, worktree.path, protectedPaths);
+      targets.push(worktree);
+    } catch (error) {
+      retained.push({ ...worktree, reason: error instanceof ProjectError ? error.message : 'Could not safely inspect the Git worktree.' });
+    }
+  }
+  return { targets, retained };
+}
+
+export async function removeAllWorktrees(repositoryPath, paths, protectedPaths = []) {
+  if (!Array.isArray(paths) || paths.some((value) => typeof value !== 'string' || !value)) {
+    throw new ProjectError('invalid_input', 'Confirmed worktree paths are required.');
+  }
+  const removed = [];
+  const reasons = new Map();
+  for (const worktreePath of new Set(paths)) {
+    try {
+      await removeWorktree(repositoryPath, worktreePath, protectedPaths);
+      removed.push(worktreePath);
+    } catch (error) {
+      reasons.set(worktreePath, error instanceof ProjectError ? error.message : 'Could not safely remove the Git worktree.');
+    }
+  }
+  const remaining = await previewWorktreeRemoval(repositoryPath, protectedPaths);
+  const retained = [...remaining.retained, ...remaining.targets].map((worktree) => ({
+    ...worktree,
+    reason: reasons.get(worktree.path) || worktree.reason || 'Not included in the confirmed targets.',
+  }));
+  return { removed, retained };
 }
 
 export async function fetchRepository(repositoryPath) {
