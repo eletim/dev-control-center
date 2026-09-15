@@ -65,6 +65,9 @@ function parseNulWorktrees(output) {
       current.branch = value.startsWith('refs/heads/')
         ? value.slice('refs/heads/'.length)
         : null;
+    } else if (attribute === 'locked' && current) {
+      current.locked = true;
+      current.lockReason = value;
     }
   }
   finishRecord();
@@ -131,7 +134,14 @@ async function metadataWorktrees(repositoryPath) {
     const administrationPath = path.join(commonDirectory, 'worktrees', entry.name);
     const gitFile = stripFinalNewline(await readFile(path.join(administrationPath, 'gitdir'), 'utf8'));
     const head = await readFile(path.join(administrationPath, 'HEAD'), 'utf8');
-    worktrees.push({ path: path.dirname(gitFile), branch: branchFromHead(head) });
+    const worktree = { path: path.dirname(gitFile), branch: branchFromHead(head) };
+    try {
+      worktree.lockReason = stripFinalNewline(await readFile(path.join(administrationPath, 'locked'), 'utf8'));
+      worktree.locked = true;
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    worktrees.push(worktree);
   }
   return worktrees;
 }
@@ -264,6 +274,9 @@ async function removableWorktree(repositoryPath, worktreePath, protectedPaths) {
       && !path.isAbsolute(relativePath))) {
       throw new ProjectError('registered_worktree', 'A registered project uses this Git worktree.');
     }
+  }
+  if (worktree.locked) {
+    throw new ProjectError('locked_worktree', `Git worktree is locked${worktree.lockReason ? `: ${worktree.lockReason}` : '.'}`);
   }
   await requireClean(worktree.canonicalPath);
 

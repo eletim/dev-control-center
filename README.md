@@ -82,6 +82,9 @@ afterward; no existing repositories or configured application data are used.
 
 The environment integration test starts DCC with a local configuration and a
 fresh isolated tmux server, checking project defaults and explicit overrides.
+The `PurpleMux integration` GitHub Actions job runs on pushes and pull requests.
+It provisions a pinned PurpleMux checkout, installs its locked dependencies,
+builds it, and runs the real startup test with DCC on 8023 and PurpleMux on 8022.
 To also test a real PurpleMux production build, with ports 8022 and 8023 free:
 
 ```sh

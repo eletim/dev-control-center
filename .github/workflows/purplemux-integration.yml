@@ -1,0 +1,39 @@
+name: PurpleMux integration
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  purplemux-startup:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      - name: Provision pinned PurpleMux
+        uses: actions/checkout@v4
+        with:
+          repository: eletim/purplemux
+          ref: 2fcf9817c50f7250f33f12b3f895cf01aa7adbbf
+          path: .integration/purplemux
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: .integration/purplemux/package.json
+      - name: Build PurpleMux
+        working-directory: .integration/purplemux
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+          NEXT_TELEMETRY_DISABLED: '1'
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+      - name: Verify PurpleMux on 8022 with DCC on 8023
+        env:
+          DCC_TEST_PURPLEMUX_DIR: ${{ github.workspace }}/.integration/purplemux
+        run: node --test test/project-environment.test.js

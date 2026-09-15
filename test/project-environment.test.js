@@ -84,6 +84,7 @@ test('real PurpleMux starts on 8022 through DCC configured on 8023', {
     id: 'purplemux', path: path.resolve(purplemuxDirectory),
     startCommand: `HOME=${quote(directory)} NODE_ENV=production ${quote(process.execPath)} dist/server.js > ${quote(path.join(directory, 'purplemux.log'))} 2>&1`,
   }], '8023');
+  assert.equal(baseUrl, 'http://127.0.0.1:8023');
   const response = await fetch(`${baseUrl}/api/projects/purplemux/start`, { method: 'POST' });
   assert.equal(response.status, 200, await response.text());
   await waitFor(async () => (await readFile(path.join(directory, '.purplemux', 'port'), 'utf8').catch(() => '')).trim() === '8022', 45000);
