@@ -40,6 +40,15 @@ export class ProjectStore {
     return this.projects.find((project) => project.id === id) ?? null;
   }
 
+  async withProjectSnapshot(operation) {
+    const access = this.pendingMutation.then(async () => {
+      await this.ready;
+      return operation(this.projects.map((project) => ({ ...project })));
+    });
+    this.pendingMutation = access.catch(() => {});
+    return access;
+  }
+
   async create(input) {
     return this.#mutate(async (projects) => {
       const project = await this.#validatedProject(input);
