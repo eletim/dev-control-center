@@ -83,7 +83,10 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
   function replaceProject(project) {
     const index = projects.findIndex(({ id }) => id === project.id);
     if (index === -1) projects.push(project);
-    else projects[index] = project;
+    else {
+      if (projects[index].process?.runId !== project.process?.runId) outputStates.delete(project.id);
+      projects[index] = project;
+    }
   }
 
   function addMetadataRow(list, termText, detailText) {
@@ -197,6 +200,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
     const worktreePath = documentObject.createElement('input');
     worktreePath.placeholder = '/home/me/code/project-topic';
     worktreePath.value = draft.path;
+    worktreePath.focusKey = `${project.id}:path`;
     worktreePath.required = true;
     worktreePath.addEventListener('input', () => { draft.path = worktreePath.value; worktreeDrafts.set(project.id, draft); });
     pathLabel.append(worktreePath);
@@ -210,6 +214,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
       mode.append(option);
     }
     mode.value = draft.mode;
+    mode.focusKey = `${project.id}:mode`;
     mode.addEventListener('change', () => {
       draft.mode = mode.value;
       draft.branch = '';
@@ -238,6 +243,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
       branchControl.placeholder = 'topic';
       branchControl.value = draft.branch;
     }
+    branchControl.focusKey = `${project.id}:branch`;
     branchControl.required = true;
     branchControl.addEventListener('input', () => { draft.branch = branchControl.value; worktreeDrafts.set(project.id, draft); });
     branchControl.addEventListener('change', () => { draft.branch = branchControl.value; worktreeDrafts.set(project.id, draft); });
@@ -371,6 +377,10 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
   }
 
   function render() {
+    const focused = documentObject.activeElement;
+    const focusKey = focused?.focusKey;
+    const selection = focused?.tagName === 'INPUT' && typeof focused.selectionStart === 'number'
+      ? [focused.selectionStart, focused.selectionEnd] : null;
     refreshButton.disabled = loadingProjects || savingProject || pendingProjects.size > 0;
     saveButton.disabled = loadingProjects || savingProject
       || Boolean(idInput.value && pendingProjects.has(idInput.value));
@@ -445,6 +455,19 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
       }
       return article;
     }));
+    if (focusKey) {
+      const findFocused = (node) => {
+        if (node.focusKey === focusKey) return node;
+        for (const child of node.children) {
+          const match = findFocused(child);
+          if (match) return match;
+        }
+        return null;
+      };
+      const replacement = findFocused(projectsElement);
+      replacement?.focus();
+      if (selection && replacement?.setSelectionRange) replacement.setSelectionRange(...selection);
+    }
   }
 
   async function loadBranches(project) {
@@ -464,27 +487,42 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
     render();
   }
 
-  async function loadWorktrees(project) {
+  function projectWorktrees(project, snapshot) {
+    const { ownerId, worktrees } = snapshot;
+    return worktrees.map((worktree) => ({
+      ...worktree,
+      isProjectWorktree: ownerId === project.id ? worktree.isProjectWorktree
+        : project.path === (worktree.canonicalPath || worktree.path)
+          || project.path.startsWith(`${(worktree.canonicalPath || worktree.path).replace(/\/$/, '')}/`),
+    }));
+  }
+
+  async function loadWorktrees(project, repositorySnapshots) {
     worktreeStates.set(project.id, { status: 'loading' });
     render();
     try {
-      const body = await requestJson(
-        `/api/projects/${encodeURIComponent(project.id)}/git/worktrees`,
-        {},
-        fetchImpl,
-      );
-      worktreeStates.set(project.id, { status: 'ready', worktrees: body.worktrees });
+      const identity = project.git?.repositoryIdentity;
+      let snapshot = identity && repositorySnapshots?.get(identity);
+      if (!snapshot) {
+        snapshot = requestJson(`/api/projects/${encodeURIComponent(project.id)}/git/worktrees`, {}, fetchImpl)
+          .then((body) => ({ ownerId: project.id, worktrees: body.worktrees }));
+        if (identity) repositorySnapshots?.set(identity, snapshot);
+      }
+      const body = await snapshot;
+      worktreeStates.set(project.id, {
+        status: 'ready', worktrees: projectWorktrees(project, body),
+      });
     } catch (error) {
       worktreeStates.set(project.id, { status: 'error', message: error.message });
     }
     render();
   }
 
-  function loadGitDetails(project) {
-    return Promise.all([loadBranches(project), loadWorktrees(project)]);
+  function loadGitDetails(project, repositorySnapshots) {
+    return Promise.all([loadBranches(project), loadWorktrees(project, repositorySnapshots)]);
   }
 
-  async function refreshProject(project, includeBranches) {
+  async function refreshProject(project, includeBranches, repositorySnapshots) {
     const refreshed = await requestJson(
       `/api/projects/${encodeURIComponent(project.id)}`,
       {},
@@ -492,7 +530,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
     );
     replaceProject(refreshed);
     render();
-    if (includeBranches && refreshed.git?.isRepository) await loadGitDetails(refreshed);
+    if (includeBranches && refreshed.git?.isRepository) await loadGitDetails(refreshed, repositorySnapshots);
     return refreshed;
   }
 
@@ -504,8 +542,9 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
   }
 
   async function refreshRepositoryProjects(relatedProjects) {
+    const repositorySnapshots = new Map();
     const results = await Promise.allSettled(relatedProjects
-      .map((candidate) => refreshProject(candidate, true)));
+      .map((candidate) => refreshProject(candidate, true, repositorySnapshots)));
     const failure = results.find(({ status }) => status === 'rejected');
     if (failure) throw failure.reason;
   }
@@ -746,7 +785,12 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
     if (clearMessage) message.textContent = '';
     render();
     try {
-      projects = await requestJson('/api/projects', {}, fetchImpl);
+      const refreshedProjects = await requestJson('/api/projects', {}, fetchImpl);
+      for (const project of refreshedProjects) {
+        if (projects.find((previous) => previous.id === project.id)?.process?.runId
+          !== project.process?.runId) outputStates.delete(project.id);
+      }
+      projects = refreshedProjects;
       for (const project of projects) {
         const feedback = projectMessages.get(project.id);
         if (project.status === 'stopped'
@@ -768,9 +812,10 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
       for (const id of expandedWorktrees) if (!projectIds.has(id)) expandedWorktrees.delete(id);
       if (activeProjectId && !projectIds.has(activeProjectId)) activeProjectId = null;
       render();
+      const repositorySnapshots = new Map();
       await Promise.all(projects
         .filter((project) => project.git?.isRepository)
-        .map((project) => loadGitDetails(project)));
+        .map((project) => loadGitDetails(project, repositorySnapshots)));
     } catch (error) {
       message.textContent = `Project refresh failed: ${error.message}`;
     } finally {

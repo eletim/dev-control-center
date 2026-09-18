@@ -91,9 +91,10 @@ export class ProjectProcessManager {
       this.#forget(id, managed);
       return null;
     }
+    const runId = createHash('sha256').update(managed.token).digest('hex');
     return pane.dead
-      ? { state: 'exited', exitCode: pane.status, signal: pane.signal }
-      : { state: 'running', exitCode: null, signal: null };
+      ? { state: 'exited', exitCode: pane.status, signal: pane.signal, runId }
+      : { state: 'running', exitCode: null, signal: null, runId };
   }
 
   output(id) {

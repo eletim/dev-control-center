@@ -138,7 +138,11 @@ test('shows retained tmux output and distinguishes normal and abnormal exits', a
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
     assert.equal(exited.status, 'stopped');
-    assert.deepEqual(exited.process, { state: 'exited', exitCode: 0, signal: null });
+    assert.deepEqual(exited.process, {
+      state: 'exited', exitCode: 0, signal: null, runId: exited.process.runId,
+    });
+    assert.ok(exited.process.runId);
+    const firstRunId = exited.process.runId;
     assert.match((await fetch(`${projectUrl}/output`).then((response) => response.json())).output, /normal output/);
 
     await fetch(projectUrl, {
@@ -148,7 +152,10 @@ test('shows retained tmux output and distinguishes normal and abnormal exits', a
     const failed = await fetch(`${projectUrl}/start`, { method: 'POST' });
     assert.equal(failed.status, 400);
     exited = await fetch(projectUrl).then((response) => response.json());
-    assert.deepEqual(exited.process, { state: 'exited', exitCode: 23, signal: null });
+    assert.deepEqual(exited.process, {
+      state: 'exited', exitCode: 23, signal: null, runId: exited.process.runId,
+    });
+    assert.notEqual(exited.process.runId, firstRunId);
     assert.match((await fetch(`${projectUrl}/output`).then((response) => response.json())).output, /failure output/);
 
     await fetch(projectUrl, {
@@ -159,7 +166,9 @@ test('shows retained tmux output and distinguishes normal and abnormal exits', a
     assert.equal(signaled.status, 400);
     assert.match((await signaled.json()).message, /signal SIGTERM/);
     exited = await fetch(projectUrl).then((response) => response.json());
-    assert.deepEqual(exited.process, { state: 'exited', exitCode: null, signal: 'SIGTERM' });
+    assert.deepEqual(exited.process, {
+      state: 'exited', exitCode: null, signal: 'SIGTERM', runId: exited.process.runId,
+    });
     assert.equal((await fetch(`${baseUrl}/api/projects/missing/output`)).status, 404);
   });
 });
@@ -252,8 +261,8 @@ test('lists and explicitly removes only unregistered worktrees under project ser
     const listed = await fetch(`${baseUrl}/api/projects/${project.id}/git/worktrees`);
     assert.equal(listed.status, 200);
     assert.deepEqual((await listed.json()).worktrees, [
-      { path: projectPath, branch: 'main', isProjectWorktree: true, clean: true },
-      { path: worktreePath, branch: 'topic', isProjectWorktree: false, clean: true },
+      { path: projectPath, branch: 'main', canonicalPath: projectPath, isProjectWorktree: true, clean: true },
+      { path: worktreePath, branch: 'topic', canonicalPath: worktreePath, isProjectWorktree: false, clean: true },
     ]);
 
     const unrelatedPath = await mkdtemp(path.join(os.tmpdir(), 'dcc-unrelated-worktree-'));

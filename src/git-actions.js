@@ -260,8 +260,10 @@ export async function listProjectWorktrees(projectPath) {
   const identity = await repositoryIdentity(projectPath);
   return Promise.all(worktrees.map(async (worktree) => {
     let isProjectWorktree = false;
+    let canonicalPath = null;
     try {
-      isProjectWorktree = pathContains(await realpath(worktree.path), canonicalProjectPath);
+      canonicalPath = await realpath(worktree.path);
+      isProjectWorktree = pathContains(canonicalPath, canonicalProjectPath);
     } catch {
       // Missing worktrees remain visible but cannot contain the project.
     }
@@ -273,7 +275,7 @@ export async function listProjectWorktrees(projectPath) {
         // The worktree may have disappeared after identity was checked.
       }
     }
-    return { ...worktree, isProjectWorktree, clean };
+    return { ...worktree, canonicalPath, isProjectWorktree, clean };
   }));
 }
 
