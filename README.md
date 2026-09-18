@@ -75,6 +75,13 @@ commands. Git branch switching and fast-forward updates require a clean working
 tree; the application never offers reset, force-push, or arbitrary Git command
 execution.
 
+In each project's Git section, create a worktree at an absolute path using a
+new branch from HEAD or an existing local branch. The list shows each worktree's
+branch and whether it has uncommitted changes. **Open as project** registers a
+worktree with the source project's Start Command and focuses its project card;
+you can edit that command afterward. Worktree removal still requires a clean,
+unregistered checkout and never forces removal.
+
 ## Test
 
 ```sh

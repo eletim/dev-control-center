@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { readdir, readFile, realpath } from 'node:fs/promises';
+import { lstat, readdir, readFile, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { ProjectError } from './project-store.js';
@@ -245,9 +245,19 @@ function pathContains(rootPath, candidatePath) {
     && !relativePath.startsWith(`..${path.sep}`) && !path.isAbsolute(relativePath));
 }
 
+async function belongsToRepository(worktreePath, expectedIdentity) {
+  try {
+    return await repositoryIdentity(worktreePath) === expectedIdentity
+      && await worktreeRoot(worktreePath) === await realpath(worktreePath);
+  } catch {
+    return false;
+  }
+}
+
 export async function listProjectWorktrees(projectPath) {
   const worktrees = await listWorktrees(projectPath);
   const canonicalProjectPath = await realpath(projectPath);
+  const identity = await repositoryIdentity(projectPath);
   return Promise.all(worktrees.map(async (worktree) => {
     let isProjectWorktree = false;
     try {
@@ -255,8 +265,64 @@ export async function listProjectWorktrees(projectPath) {
     } catch {
       // Missing worktrees remain visible but cannot contain the project.
     }
-    return { ...worktree, isProjectWorktree };
+    let clean = null;
+    if (await belongsToRepository(worktree.path, identity)) {
+      try {
+        clean = (await git(worktree.path, ['status', '--porcelain'])) === '';
+      } catch {
+        // The worktree may have disappeared after identity was checked.
+      }
+    }
+    return { ...worktree, isProjectWorktree, clean };
   }));
+}
+
+export async function openWorktree(repositoryPath, requestedPath) {
+  if (typeof requestedPath !== 'string' || !requestedPath) {
+    throw new ProjectError('invalid_worktree', 'An existing worktree path is required.');
+  }
+  const worktree = await findRegisteredWorktree(await listWorktrees(repositoryPath), requestedPath);
+  if (!worktree || !await belongsToRepository(worktree.path, await repositoryIdentity(repositoryPath))) {
+    throw new ProjectError('invalid_worktree', 'Worktree no longer belongs to this repository.');
+  }
+  return worktree.canonicalPath;
+}
+
+export async function createWorktree(repositoryPath, input) {
+  await requireRepository(repositoryPath);
+  const { path: worktreePath, branch, createBranch } = input ?? {};
+  if (typeof worktreePath !== 'string' || !path.isAbsolute(worktreePath)) {
+    throw new ProjectError('invalid_worktree', 'An absolute worktree path is required.');
+  }
+  const destination = path.resolve(worktreePath);
+  if (typeof branch !== 'string' || branch.trim() !== branch || !branch || branch === '-'
+    || !await isSuccessfulGit(repositoryPath, ['check-ref-format', '--branch', branch])) {
+    throw new ProjectError('invalid_branch', 'A valid local branch name is required.');
+  }
+  if (typeof createBranch !== 'boolean') {
+    throw new ProjectError('invalid_input', 'Choose whether to create a new branch.');
+  }
+  const exists = await isSuccessfulGit(repositoryPath, [
+    'show-ref', '--verify', '--quiet', `refs/heads/${branch}`,
+  ]);
+  if (exists === createBranch) {
+    throw new ProjectError('invalid_branch', createBranch
+      ? 'That local branch already exists.' : 'That local branch does not exist.');
+  }
+  try {
+    await lstat(destination);
+    throw new ProjectError('worktree_path_exists', 'Worktree path already exists.');
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  try {
+    await git(repositoryPath, createBranch
+      ? ['worktree', 'add', '-b', branch, destination]
+      : ['worktree', 'add', destination, branch]);
+  } catch {
+    throw new ProjectError('worktree_create_failed', 'Could not create the Git worktree.');
+  }
+  return destination;
 }
 
 async function removableWorktree(repositoryPath, worktreePath, protectedPaths) {

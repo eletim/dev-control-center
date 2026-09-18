@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  fetchRepository, GitActionManager, listBranches, listProjectWorktrees, previewWorktreeRemoval, removeAllWorktrees,
+  createWorktree, fetchRepository, GitActionManager, listBranches, listProjectWorktrees, openWorktree, previewWorktreeRemoval, removeAllWorktrees,
   removeWorktree, switchBranch, updateRepository,
 } from './git-actions.js';
 import { getGitMetadata } from './git-metadata.js';
@@ -61,6 +61,7 @@ export function createAppServer(
       const outputMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/output$/);
       const gitActionMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/git\/(branches|fetch|update|switch)$/);
       const bulkWorktreeMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/git\/worktrees\/removal$/);
+      const openWorktreeMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/git\/worktrees\/open$/);
       const worktreeMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/git\/worktrees$/);
 
       if (request.method === 'GET' && url.pathname === '/api/projects') {
@@ -133,14 +134,33 @@ export function createAppServer(
         return;
       }
 
-      if (worktreeMatch && (request.method === 'GET' || request.method === 'DELETE')) {
+      if (openWorktreeMatch && request.method === 'POST') {
+        const id = decodeURIComponent(openWorktreeMatch[1]);
+        const input = await readJson(request);
+        const { opened, created } = await processManager.withProjectLock(id, async () => {
+          const project = await store.get(id);
+          if (!project) throw new ProjectError('not_found', 'Project not found.');
+          return gitActionManager.withRepositoryLock(project.path, async () => {
+            const worktreePath = await openWorktree(project.path, input?.path);
+            const existing = (await store.list()).find((candidate) => candidate.path === worktreePath);
+            return existing
+              ? { opened: existing, created: false }
+              : { opened: await store.create({ path: worktreePath, startCommand: project.startCommand }), created: true };
+          });
+        });
+        sendJson(response, created ? 201 : 200, await present(opened, processManager));
+        return;
+      }
+
+      if (worktreeMatch && ['GET', 'POST', 'DELETE'].includes(request.method)) {
         const id = decodeURIComponent(worktreeMatch[1]);
-        const input = request.method === 'DELETE' ? await readJson(request) : null;
+        const input = request.method !== 'GET' ? await readJson(request) : null;
         const result = await processManager.withProjectLock(id, async () => {
           const project = await store.get(id);
           if (!project) throw new ProjectError('not_found', 'Project not found.');
           return gitActionManager.withRepositoryLock(project.path, async () => {
             if (request.method === 'GET') return listProjectWorktrees(project.path);
+            if (request.method === 'POST') return createWorktree(project.path, input);
             await store.withProjectSnapshot(async (projects) => {
               await removeWorktree(project.path, input?.path, projects.map((candidate) => candidate.path));
             });
@@ -148,6 +168,7 @@ export function createAppServer(
           });
         });
         if (request.method === 'GET') sendJson(response, 200, { worktrees: result });
+        else if (request.method === 'POST') sendJson(response, 201, { path: result });
         else {
           response.writeHead(204);
           response.end();
@@ -204,6 +225,7 @@ export function createAppServer(
           'duplicate_path', 'already_running', 'not_running', 'project_running',
           'dirty_worktree', 'git_state_changed', 'non_fast_forward', 'branch_in_use',
           'registered_worktree', 'main_worktree', 'worktree_remove_failed',
+          'worktree_path_exists', 'worktree_create_failed',
         ];
         const status = error.code === 'not_found' ? 404
           : error.code === 'shutting_down' ? 503

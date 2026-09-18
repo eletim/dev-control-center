@@ -577,7 +577,7 @@ test('lists worktrees and removes one only after confirmation before refreshing 
   const projects = document.elements.get('projects');
   assert.ok(findElement(projects, project.path));
   assert.ok(findElement(projects, linkedPath));
-  assert.equal(findElements(projects, 'Branch').length, 3);
+  assert.equal(findElements(projects, 'Branch').length, 4);
   assert.ok(findElement(projects, 'main'));
   assert.ok(findElement(projects, 'topic'));
   assert.equal(findElements(projects, 'Remove Worktree').length, 1);
@@ -599,6 +599,60 @@ test('lists worktrees and removes one only after confirmation before refreshing 
   assert.equal(requests.filter(({ url }) => url.endsWith('/git/branches')).length, 2);
   assert.equal(requests.filter(({ url, method }) => method === 'GET' && url.endsWith('/git/worktrees')).length, 2);
   assert.equal(requests.some(({ url }) => url.includes('/git/switch')), false);
+});
+
+test('creates a worktree and opens it as a focused project', async () => {
+  const document = createTestDocument();
+  const main = {
+    id: 'main', name: 'demo', path: '/code/demo', startCommand: 'npm start', status: 'stopped',
+    git: { isRepository: true, repositoryIdentity: '/code/demo/.git', branch: 'main', clean: true },
+  };
+  const linked = {
+    ...main, id: 'linked', name: 'demo-topic', path: '/code/demo-topic',
+    git: { ...main.git, branch: 'topic' },
+  };
+  const projects = [main];
+  let worktrees = [{ path: main.path, branch: 'main', clean: true }];
+  const requests = [];
+  const fetchImpl = async (url, options = {}) => {
+    const method = options.method || 'GET';
+    requests.push({ url, method, body: options.body });
+    if (url === '/api/projects' && method === 'GET') return jsonResponse(projects);
+    if (url === '/api/projects/main/git/worktrees/open' && method === 'POST') {
+      projects.push(linked);
+      return jsonResponse(linked, 201);
+    }
+    if (url.endsWith('/git/worktrees') && method === 'POST') {
+      worktrees = [...worktrees, { path: linked.path, branch: 'topic', clean: true }];
+      return jsonResponse({ path: linked.path }, 201);
+    }
+    if (url.endsWith('/git/worktrees')) return jsonResponse({ worktrees });
+    if (url.endsWith('/git/branches')) return jsonResponse({ branches: ['main', 'topic'] });
+    if (url === `/api/projects/${main.id}`) return jsonResponse(main);
+    if (url === `/api/projects/${linked.id}`) return jsonResponse(linked);
+    throw new Error(`Unexpected request: ${url}`);
+  };
+  const dashboard = initDashboard(document, fetchImpl, () => true);
+  await dashboard.ready;
+  const root = document.elements.get('projects');
+  const pathInput = findTag(findElement(root, 'New worktree path'), 'input');
+  pathInput.value = linked.path;
+  await pathInput.dispatch('input');
+  const branchInput = findTag(findElements(root, 'Branch').find((element) => element.tagName === 'LABEL'), 'input');
+  branchInput.value = 'topic';
+  await branchInput.dispatch('input');
+  await findElement(root, 'Create worktree').dispatch('click');
+  assert.deepEqual(JSON.parse(requests.find(({ method, url }) => method === 'POST'
+    && url.endsWith('/git/worktrees')).body), {
+    path: linked.path, branch: 'topic', createBranch: true,
+  });
+  const row = findWorktreeRow(root, linked.path);
+  assert.ok(findElement(row, 'Clean'));
+  await findElement(row, 'Open as project').dispatch('click');
+  assert.deepEqual(JSON.parse(requests.find(({ method, url }) => method === 'POST'
+    && url === '/api/projects/main/git/worktrees/open').body), { path: linked.path });
+  await waitFor(() => Boolean(findElement(root, 'Current target') && findElement(root, linked.path)));
+  assert.equal(document.elements.get('project-search').value, '');
 });
 
 test('Git actions and worktree removal refresh every project from the same repository', async () => {
