@@ -1,9 +1,9 @@
-import { readFile, realpath } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  fetchRepository, GitActionManager, listBranches, listWorktrees, previewWorktreeRemoval, removeAllWorktrees,
+  fetchRepository, GitActionManager, listBranches, listProjectWorktrees, previewWorktreeRemoval, removeAllWorktrees,
   removeWorktree, switchBranch, updateRepository,
 } from './git-actions.js';
 import { getGitMetadata } from './git-metadata.js';
@@ -130,20 +130,7 @@ export function createAppServer(
           const project = await store.get(id);
           if (!project) throw new ProjectError('not_found', 'Project not found.');
           return gitActionManager.withRepositoryLock(project.path, async () => {
-            if (request.method === 'GET') {
-              const worktrees = await listWorktrees(project.path);
-              return Promise.all(worktrees.map(async (worktree) => {
-                let isProjectWorktree = false;
-                try {
-                  const relativePath = path.relative(await realpath(worktree.path), project.path);
-                  isProjectWorktree = relativePath === '' || (relativePath !== '..'
-                    && !relativePath.startsWith(`..${path.sep}`) && !path.isAbsolute(relativePath));
-                } catch {
-                  // Missing worktrees remain visible but cannot match the registered path.
-                }
-                return { ...worktree, isProjectWorktree };
-              }));
-            }
+            if (request.method === 'GET') return listProjectWorktrees(project.path);
             await store.withProjectSnapshot(async (projects) => {
               await removeWorktree(project.path, input?.path, projects.map((candidate) => candidate.path));
             });
