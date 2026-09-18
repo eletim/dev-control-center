@@ -141,6 +141,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
     branchLabel.textContent = 'Local branch';
     const select = documentObject.createElement('select');
     select.setAttribute('aria-label', `Local branch for ${project.name}`);
+    select.focusKey = `${project.id}:local-branch`;
     const branchState = branchStates.get(project.id);
     const branchesReady = branchState?.status === 'ready';
     const branches = branchesReady ? branchState.branches : [];
@@ -160,7 +161,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
     const selectedBranch = selectedBranches.get(project.id);
     select.value = selectedBranch && branches.includes(selectedBranch)
       ? selectedBranch : branches.includes(project.git.branch) ? project.git.branch : '';
-    select.disabled = busy || !branchesReady || branches.length === 0;
+    select.disabled = (busy && !loadingProjects) || !branchesReady || branches.length === 0;
     branchLabel.append(select);
     const switchButton = makeButton('Switch', 'secondary', true, () => {
       runGitAction(project, 'switch', select.value);
@@ -470,15 +471,19 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
     }
   }
 
-  async function loadBranches(project) {
-    branchStates.set(project.id, { status: 'loading' });
-    render();
+  async function loadBranches(project, repositorySnapshots) {
+    if (branchStates.get(project.id)?.status !== 'ready') {
+      branchStates.set(project.id, { status: 'loading' });
+      render();
+    }
     try {
-      const body = await requestJson(
-        `/api/projects/${encodeURIComponent(project.id)}/git/branches`,
-        {},
-        fetchImpl,
-      );
+      const identity = project.git?.repositoryIdentity;
+      let snapshot = identity && repositorySnapshots?.branches.get(identity);
+      if (!snapshot) {
+        snapshot = requestJson(`/api/projects/${encodeURIComponent(project.id)}/git/branches`, {}, fetchImpl);
+        if (identity) repositorySnapshots?.branches.set(identity, snapshot);
+      }
+      const body = await snapshot;
       if (!body.branches.includes(selectedBranches.get(project.id))) selectedBranches.delete(project.id);
       branchStates.set(project.id, { status: 'ready', branches: body.branches });
     } catch (error) {
@@ -502,11 +507,11 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
     render();
     try {
       const identity = project.git?.repositoryIdentity;
-      let snapshot = identity && repositorySnapshots?.get(identity);
+      let snapshot = identity && repositorySnapshots?.worktrees.get(identity);
       if (!snapshot) {
         snapshot = requestJson(`/api/projects/${encodeURIComponent(project.id)}/git/worktrees`, {}, fetchImpl)
           .then((body) => ({ ownerId: project.id, worktrees: body.worktrees }));
-        if (identity) repositorySnapshots?.set(identity, snapshot);
+        if (identity) repositorySnapshots?.worktrees.set(identity, snapshot);
       }
       const body = await snapshot;
       worktreeStates.set(project.id, {
@@ -519,7 +524,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
   }
 
   function loadGitDetails(project, repositorySnapshots) {
-    return Promise.all([loadBranches(project), loadWorktrees(project, repositorySnapshots)]);
+    return Promise.all([loadBranches(project, repositorySnapshots), loadWorktrees(project, repositorySnapshots)]);
   }
 
   async function refreshProject(project, includeBranches, repositorySnapshots) {
@@ -542,7 +547,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
   }
 
   async function refreshRepositoryProjects(relatedProjects) {
-    const repositorySnapshots = new Map();
+    const repositorySnapshots = { branches: new Map(), worktrees: new Map() };
     const results = await Promise.allSettled(relatedProjects
       .map((candidate) => refreshProject(candidate, true, repositorySnapshots)));
     const failure = results.find(({ status }) => status === 'rejected');
@@ -812,7 +817,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
       for (const id of expandedWorktrees) if (!projectIds.has(id)) expandedWorktrees.delete(id);
       if (activeProjectId && !projectIds.has(activeProjectId)) activeProjectId = null;
       render();
-      const repositorySnapshots = new Map();
+      const repositorySnapshots = { branches: new Map(), worktrees: new Map() };
       await Promise.all(projects
         .filter((project) => project.git?.isRepository)
         .map((project) => loadGitDetails(project, repositorySnapshots)));

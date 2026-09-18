@@ -39,7 +39,7 @@ class TestElement {
     this[name] = value;
   }
 
-  focus() { if (this.ownerDocument) this.ownerDocument.activeElement = this; }
+  focus() { if (this.ownerDocument && !this.disabled) this.ownerDocument.activeElement = this; }
 
   reset() {}
 
@@ -263,6 +263,7 @@ test('keeps a selected branch available for Switch across automatic refreshes', 
   const select = findTag(card, 'select');
   select.value = 'topic';
   await select.dispatch('change');
+  select.focus();
   assert.equal(findElement(card, 'Switch').disabled, false);
 
   tick();
@@ -270,6 +271,7 @@ test('keeps a selected branch available for Switch across automatic refreshes', 
     && !document.elements.get('refresh').disabled);
   card = document.elements.get('projects').children[0];
   assert.equal(findTag(card, 'select').value, 'topic');
+  assert.equal(document.activeElement, findTag(card, 'select'));
   assert.equal(findElement(card, 'Switch').disabled, false);
   await findElement(card, 'Switch').dispatch('click');
   assert.equal(switchedBranch, 'topic');
@@ -1056,16 +1058,20 @@ test('automatic refresh discards output when another client starts a new managed
   assert.ok(findElement(document.elements.get('projects'), 'View output'));
 });
 
-test('shared repository projects use one worktree snapshot per refresh', async () => {
+test('shared repository projects use one branch and worktree snapshot per refresh', async () => {
   const document = createTestDocument();
   const projects = ['main', 'linked'].map((id) => ({ id, name: id, path: `/code/${id}`,
     startCommand: 'true', status: 'stopped',
     git: { isRepository: true, repositoryIdentity: 'shared' } }));
   let tick;
+  let branchRequests = 0;
   let worktreeRequests = 0;
   const fetchImpl = async (url) => {
     if (url === '/api/projects') return jsonResponse(projects);
-    if (url.endsWith('/git/branches')) return jsonResponse({ branches: [] });
+    if (url.endsWith('/git/branches')) {
+      branchRequests += 1;
+      return jsonResponse({ branches: ['main', 'topic'] });
+    }
     worktreeRequests += 1;
     return jsonResponse({ worktrees: [
       { path: '/alias/main', canonicalPath: '/code/main', isProjectWorktree: true },
@@ -1075,11 +1081,13 @@ test('shared repository projects use one worktree snapshot per refresh', async (
   await initDashboard(document, fetchImpl, () => true, {
     setIntervalImpl: (callback) => { tick = callback; },
   }).ready;
+  assert.equal(branchRequests, 1);
   assert.equal(worktreeRequests, 1);
   const cards = document.elements.get('projects').children;
   assert.ok(findElement(findWorktreeRow(cards[0], '/alias/main'), 'Project worktree'));
   assert.ok(findElement(findWorktreeRow(cards[1], '/code/linked'), 'Project worktree'));
   tick();
-  await waitFor(() => worktreeRequests === 2);
+  await waitFor(() => branchRequests === 2 && worktreeRequests === 2);
+  assert.equal(branchRequests, 2);
   assert.equal(worktreeRequests, 2);
 });
