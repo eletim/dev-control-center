@@ -286,14 +286,18 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
   }
 
   async function loadOutput(id) {
-    outputStates.set(id, { open: true, loading: true });
+    const loadingState = { open: true, loading: true };
+    outputStates.set(id, loadingState);
     render();
+    let nextState;
     try {
       const result = await requestJson(`/api/projects/${encodeURIComponent(id)}/output`, {}, fetchImpl);
-      outputStates.set(id, { open: true, loading: false, output: result.output });
+      nextState = { open: true, loading: false, output: result.output };
     } catch (error) {
-      outputStates.set(id, { open: true, loading: false, error: error.message });
+      nextState = { open: true, loading: false, error: error.message };
     }
+    if (outputStates.get(id) !== loadingState) return;
+    outputStates.set(id, nextState);
     render();
   }
 
