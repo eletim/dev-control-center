@@ -66,6 +66,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
   const branchStates = new Map();
   const selectedBranches = new Map();
   const worktreeStates = new Map();
+  const outputStates = new Map();
   const collapsedProjects = new Set();
   const expandedWorktrees = new Set();
   let activeProjectId = null;
@@ -247,6 +248,59 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
     return section;
   }
 
+  function renderProcess(project) {
+    const section = documentObject.createElement('section');
+    section.className = 'process-output';
+    const heading = documentObject.createElement('h4');
+    heading.textContent = 'Process output';
+    section.append(heading);
+    if (project.process?.state === 'exited') {
+      const outcome = documentObject.createElement('p');
+      const { exitCode, signal } = project.process;
+      const normal = exitCode === 0 && !signal;
+      outcome.className = `exit-result ${normal ? 'success' : 'error'}`;
+      outcome.textContent = normal ? 'Exited normally (exit code 0).'
+        : signal ? `Exited abnormally (signal ${signal}).`
+          : exitCode === null ? 'Exited abnormally (reason unavailable).'
+            : `Exited abnormally (exit code ${exitCode}).`;
+      section.append(outcome);
+    }
+    const state = outputStates.get(project.id);
+    section.append(makeButton(state?.open ? 'Hide output' : 'View output', 'secondary compact', false, () => {
+      if (state?.open) {
+        outputStates.set(project.id, { ...state, open: false });
+        render();
+      } else loadOutput(project.id);
+    }));
+    if (state?.open) {
+      section.append(makeButton('Refresh output', 'secondary compact', state.loading, () => loadOutput(project.id)));
+      const output = documentObject.createElement('pre');
+      output.className = 'process-output-text';
+      output.textContent = state.loading ? 'Loading output…'
+        : state.error ? `Output unavailable: ${state.error}`
+          : state.output === null ? 'No retained tmux output is available.'
+            : state.output.trimEnd() || 'No output yet.';
+      section.append(output);
+    }
+    return section;
+  }
+
+  async function loadOutput(id) {
+    const loadingState = { open: true, loading: true };
+    outputStates.set(id, loadingState);
+    render();
+    let nextState;
+    try {
+      const result = await requestJson(`/api/projects/${encodeURIComponent(id)}/output`, {}, fetchImpl);
+      nextState = { open: true, loading: false, output: result.output };
+    } catch (error) {
+      nextState = { open: true, loading: false, error: error.message };
+    }
+    if (outputStates.get(id) !== loadingState) return;
+    outputStates.set(id, nextState);
+    render();
+  }
+
   function render() {
     refreshButton.disabled = loadingProjects || savingProject || pendingProjects.size > 0;
     saveButton.disabled = loadingProjects || savingProject
@@ -311,7 +365,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
         active.textContent = 'Current target';
         article.append(active);
       }
-      if (!collapsedProjects.has(project.id)) article.append(command, actions, renderGit(project, busy));
+      if (!collapsedProjects.has(project.id)) article.append(command, actions, renderProcess(project), renderGit(project, busy));
       const projectMessage = projectMessages.get(project.id);
       if (projectMessage) {
         const feedback = documentObject.createElement('p');
@@ -435,6 +489,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
 
   function runLifecycleAction(project, action) {
     const labels = { start: 'Start', stop: 'Stop', restart: 'Restart' };
+    if (action !== 'stop') outputStates.delete(project.id);
     return performProjectAction(
       project,
       labels[action],
@@ -572,6 +627,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
       for (const id of branchStates.keys()) if (!projectIds.has(id)) branchStates.delete(id);
       for (const id of selectedBranches.keys()) if (!projectIds.has(id)) selectedBranches.delete(id);
       for (const id of worktreeStates.keys()) if (!projectIds.has(id)) worktreeStates.delete(id);
+      for (const id of outputStates.keys()) if (!projectIds.has(id)) outputStates.delete(id);
       for (const id of projectMessages.keys()) if (!projectIds.has(id)) projectMessages.delete(id);
       for (const id of collapsedProjects) if (!projectIds.has(id)) collapsedProjects.delete(id);
       for (const id of expandedWorktrees) if (!projectIds.has(id)) expandedWorktrees.delete(id);
@@ -641,6 +697,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
       branchStates.delete(project.id);
       selectedBranches.delete(project.id);
       worktreeStates.delete(project.id);
+      outputStates.delete(project.id);
       projectMessages.delete(project.id);
       projectsRefreshRequired = true;
     } catch (error) {

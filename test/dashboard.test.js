@@ -126,6 +126,65 @@ function jsonResponse(body, status = 200) {
   return { ok: status >= 200 && status < 300, status, json: async () => body };
 }
 
+test('shows exit reason and lets a stopped project display its tmux output', async () => {
+  const document = createTestDocument();
+  const project = {
+    id: 'one', name: 'demo', path: '/demo', startCommand: 'run', status: 'stopped',
+    process: { state: 'exited', exitCode: 23, signal: null },
+    git: { isRepository: false },
+  };
+  const fetchImpl = async (url) => {
+    if (url === '/api/projects') return jsonResponse([project]);
+    if (url.endsWith('/output')) return jsonResponse({ output: 'failure on stderr\n' });
+    throw new Error(`Unexpected request: ${url}`);
+  };
+  await initDashboard(document, fetchImpl, () => true, { setIntervalImpl: () => null }).ready;
+  const projects = document.elements.get('projects');
+  assert.ok(findElement(projects, 'Exited abnormally (exit code 23).'));
+  await findElement(projects, 'View output').dispatch('click');
+  assert.ok(findElement(projects, 'failure on stderr'));
+  assert.ok(findElement(projects, 'Refresh output'));
+  project.process = { state: 'exited', exitCode: null, signal: 'SIGTERM' };
+  await document.elements.get('refresh').dispatch('click');
+  assert.ok(findElement(projects, 'Exited abnormally (signal SIGTERM).'));
+});
+
+test('ignores output from the previous run after Start or Restart', async () => {
+  for (const action of ['Start', 'Restart']) {
+    const document = createTestDocument();
+    const project = {
+      id: 'one', name: 'demo', path: '/demo', startCommand: 'run',
+      status: action === 'Start' ? 'stopped' : 'running',
+      git: { isRepository: false },
+    };
+    const oldOutput = deferred();
+    let outputRequests = 0;
+    const fetchImpl = async (url, options = {}) => {
+      if (url === '/api/projects') return jsonResponse([project]);
+      if (url.endsWith('/output')) {
+        outputRequests += 1;
+        return outputRequests === 1 ? oldOutput.promise : jsonResponse({ output: 'new run output' });
+      }
+      if (options.method === 'POST') {
+        project.status = 'running';
+        return jsonResponse(project);
+      }
+      if (url === '/api/projects/one') return jsonResponse(project);
+      throw new Error(`Unexpected request: ${url}`);
+    };
+    await initDashboard(document, fetchImpl, () => true, { setIntervalImpl: () => null }).ready;
+    const projects = document.elements.get('projects');
+    await findElement(projects, 'View output').dispatch('click');
+    await findElement(projects, action).dispatch('click');
+    oldOutput.resolve(jsonResponse({ output: 'old run output' }));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(findElement(projects, 'View output'), action);
+    assert.equal(findElement(projects, 'old run output'), null, action);
+    await findElement(projects, 'View output').dispatch('click');
+    await waitFor(() => Boolean(findElement(projects, 'new run output')));
+  }
+});
+
 test('refreshes external Git and process changes on a timer and when the tab becomes visible', async () => {
   const document = createTestDocument();
   const project = {
