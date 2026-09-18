@@ -60,9 +60,11 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
   let savingProject = false;
   let savingProjectId = null;
   let projectsRefreshRequired = false;
+  let visibilityRefreshRequired = false;
   const pendingProjects = new Set();
   const projectMessages = new Map();
   const branchStates = new Map();
+  const selectedBranches = new Map();
   const worktreeStates = new Map();
   const collapsedProjects = new Set();
   const expandedWorktrees = new Set();
@@ -150,6 +152,9 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
       option.selected = branch === project.git.branch;
       select.append(option);
     }
+    const selectedBranch = selectedBranches.get(project.id);
+    select.value = selectedBranch && branches.includes(selectedBranch)
+      ? selectedBranch : branches.includes(project.git.branch) ? project.git.branch : '';
     select.disabled = busy || !branchesReady || branches.length === 0;
     branchLabel.append(select);
     const switchButton = makeButton('Switch', 'secondary', true, () => {
@@ -158,7 +163,10 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
     const updateSwitchState = () => {
       switchButton.disabled = busy || !select.value || select.value === project.git.branch;
     };
-    select.addEventListener('change', updateSwitchState);
+    select.addEventListener('change', () => {
+      selectedBranches.set(project.id, select.value);
+      updateSwitchState();
+    });
     updateSwitchState();
     branchControls.append(branchLabel, switchButton);
     section.append(branchControls);
@@ -325,6 +333,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
         {},
         fetchImpl,
       );
+      if (!body.branches.includes(selectedBranches.get(project.id))) selectedBranches.delete(project.id);
       branchStates.set(project.id, { status: 'ready', branches: body.branches });
     } catch (error) {
       branchStates.set(project.id, { status: 'error', message: error.message });
@@ -561,6 +570,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
       }
       const projectIds = new Set(projects.map(({ id }) => id));
       for (const id of branchStates.keys()) if (!projectIds.has(id)) branchStates.delete(id);
+      for (const id of selectedBranches.keys()) if (!projectIds.has(id)) selectedBranches.delete(id);
       for (const id of worktreeStates.keys()) if (!projectIds.has(id)) worktreeStates.delete(id);
       for (const id of projectMessages.keys()) if (!projectIds.has(id)) projectMessages.delete(id);
       for (const id of collapsedProjects) if (!projectIds.has(id)) collapsedProjects.delete(id);
@@ -575,13 +585,27 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
     } finally {
       loadingProjects = false;
       render();
+      await reconcileProjectsWhenIdle();
     }
   }
 
   async function reconcileProjectsWhenIdle() {
-    if (!projectsRefreshRequired || loadingProjects || savingProject || pendingProjects.size > 0) return;
+    if ((!projectsRefreshRequired && !visibilityRefreshRequired)
+      || loadingProjects || savingProject || pendingProjects.size > 0) return;
+    if (documentObject.hidden && !projectsRefreshRequired) return;
     projectsRefreshRequired = false;
+    visibilityRefreshRequired = false;
     await loadProjects(false);
+  }
+
+  function refreshWhenVisible() {
+    if (documentObject.hidden) return;
+    if (loadingProjects || savingProject || pendingProjects.size > 0) {
+      visibilityRefreshRequired = true;
+      return;
+    }
+    visibilityRefreshRequired = false;
+    loadProjects(false);
   }
 
   function editProject(project) {
@@ -615,6 +639,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
       if (idInput.value === project.id) resetForm();
       projects = projects.filter(({ id }) => id !== project.id);
       branchStates.delete(project.id);
+      selectedBranches.delete(project.id);
       worktreeStates.delete(project.id);
       projectMessages.delete(project.id);
       projectsRefreshRequired = true;
@@ -659,7 +684,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
   searchInput.addEventListener('input', render);
   refreshButton.addEventListener('click', () => loadProjects());
   documentObject.addEventListener?.('visibilitychange', () => {
-    if (!documentObject.hidden) loadProjects(false);
+    refreshWhenVisible();
   });
   const refreshTimer = setIntervalImpl(() => {
     if (!documentObject.hidden) loadProjects(false);

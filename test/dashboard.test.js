@@ -164,6 +164,71 @@ test('refreshes external Git and process changes on a timer and when the tab bec
   await waitFor(() => listRequests === 3);
 });
 
+test('keeps a selected branch available for Switch across automatic refreshes', async () => {
+  const document = createTestDocument();
+  const project = {
+    id: 'one', name: 'demo', path: '/demo', startCommand: 'npm start', status: 'stopped',
+    git: { isRepository: true, branch: 'main', clean: true },
+  };
+  let tick;
+  let switchedBranch;
+  const fetchImpl = async (url, options = {}) => {
+    if (url === '/api/projects') return jsonResponse([project]);
+    if (url.endsWith('/git/branches')) return jsonResponse({ branches: ['main', 'topic'] });
+    if (url.endsWith('/git/worktrees')) return jsonResponse({ worktrees: [] });
+    if (url.endsWith('/git/switch') && options.method === 'POST') {
+      switchedBranch = JSON.parse(options.body).branch;
+    }
+    return jsonResponse(project);
+  };
+  const dashboard = initDashboard(document, fetchImpl, () => true, {
+    setIntervalImpl: (callback) => { tick = callback; },
+  });
+  await dashboard.ready;
+  let card = document.elements.get('projects').children[0];
+  const select = findTag(card, 'select');
+  select.value = 'topic';
+  await select.dispatch('change');
+  assert.equal(findElement(card, 'Switch').disabled, false);
+
+  tick();
+  await waitFor(() => document.elements.get('projects').children[0] !== card
+    && !document.elements.get('refresh').disabled);
+  card = document.elements.get('projects').children[0];
+  assert.equal(findTag(card, 'select').value, 'topic');
+  assert.equal(findElement(card, 'Switch').disabled, false);
+  await findElement(card, 'Switch').dispatch('click');
+  assert.equal(switchedBranch, 'topic');
+});
+
+test('runs a visibility refresh after an active project operation settles', async () => {
+  const document = createTestDocument();
+  const project = {
+    id: 'one', name: 'demo', path: '/demo', startCommand: 'npm start', status: 'stopped',
+    git: { isRepository: false },
+  };
+  const startResponse = deferred();
+  let listRequests = 0;
+  const fetchImpl = async (url, options = {}) => {
+    if (url === '/api/projects') {
+      listRequests += 1;
+      return jsonResponse([{ ...project, name: listRequests === 1 ? 'demo' : 'updated' }]);
+    }
+    if (options.method === 'POST') return startResponse.promise;
+    return jsonResponse({ ...project, status: 'running' });
+  };
+  const dashboard = initDashboard(document, fetchImpl, () => true, { setIntervalImpl: () => {} });
+  await dashboard.ready;
+  const action = findElement(document.elements.get('projects'), 'Start').dispatch('click');
+  document.dispatch('visibilitychange');
+  assert.equal(listRequests, 1);
+
+  startResponse.resolve(jsonResponse({ ...project, status: 'running' }));
+  await action;
+  await waitFor(() => listRequests === 2);
+  assert.ok(findElement(document.elements.get('projects'), 'updated'));
+});
+
 test('reports an already exited Start Command without claiming it is running', async () => {
   const document = createTestDocument();
   const project = {
