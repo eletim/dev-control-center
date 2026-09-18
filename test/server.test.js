@@ -119,6 +119,41 @@ test('controls project lifecycle and blocks running project mutations', async ()
   });
 });
 
+test('shows retained tmux output and distinguishes normal and abnormal exits', async () => {
+  await withServer(async (baseUrl, projectPath) => {
+    const created = await fetch(`${baseUrl}/api/projects`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: projectPath, startCommand: 'printf "normal output\\n"; exit 0' }),
+    }).then((response) => response.json());
+    const projectUrl = `${baseUrl}/api/projects/${created.id}`;
+    assert.deepEqual(created.process, null);
+    assert.deepEqual(await fetch(`${projectUrl}/output`).then((response) => response.json()), { output: null });
+
+    await fetch(`${projectUrl}/start`, { method: 'POST' });
+    let exited;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      exited = await fetch(projectUrl).then((response) => response.json());
+      if (exited.process?.state === 'exited') break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(exited.status, 'stopped');
+    assert.deepEqual(exited.process, { state: 'exited', exitCode: 0, signal: null });
+    assert.match((await fetch(`${projectUrl}/output`).then((response) => response.json())).output, /normal output/);
+
+    await fetch(projectUrl, {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: projectPath, startCommand: 'printf "failure output\\n" >&2; exit 23' }),
+    });
+    const failed = await fetch(`${projectUrl}/start`, { method: 'POST' });
+    assert.equal(failed.status, 400);
+    exited = await fetch(projectUrl).then((response) => response.json());
+    assert.deepEqual(exited.process, { state: 'exited', exitCode: 23, signal: null });
+    assert.match((await fetch(`${projectUrl}/output`).then((response) => response.json())).output, /failure output/);
+    assert.equal((await fetch(`${baseUrl}/api/projects/missing/output`)).status, 404);
+  });
+});
+
 test('returns useful errors for invalid requests', async () => {
   await withServer(async (baseUrl) => {
     const invalid = await fetch(`${baseUrl}/api/projects`, {

@@ -126,6 +126,26 @@ function jsonResponse(body, status = 200) {
   return { ok: status >= 200 && status < 300, status, json: async () => body };
 }
 
+test('shows exit reason and lets a stopped project display its tmux output', async () => {
+  const document = createTestDocument();
+  const project = {
+    id: 'one', name: 'demo', path: '/demo', startCommand: 'run', status: 'stopped',
+    process: { state: 'exited', exitCode: 23, signal: null },
+    git: { isRepository: false },
+  };
+  const fetchImpl = async (url) => {
+    if (url === '/api/projects') return jsonResponse([project]);
+    if (url.endsWith('/output')) return jsonResponse({ output: 'failure on stderr\n' });
+    throw new Error(`Unexpected request: ${url}`);
+  };
+  await initDashboard(document, fetchImpl, () => true, { setIntervalImpl: () => null }).ready;
+  const projects = document.elements.get('projects');
+  assert.ok(findElement(projects, 'Exited abnormally (exit code 23).'));
+  await findElement(projects, 'View output').dispatch('click');
+  assert.ok(findElement(projects, 'failure on stderr'));
+  assert.ok(findElement(projects, 'Refresh output'));
+});
+
 test('refreshes external Git and process changes on a timer and when the tab becomes visible', async () => {
   const document = createTestDocument();
   const project = {

@@ -83,6 +83,28 @@ export class ProjectProcessManager {
     return !pane.dead;
   }
 
+  processInfo(id) {
+    const managed = this.processes.get(id);
+    if (!managed || managed.pending) return null;
+    const pane = this.#paneState(managed);
+    if (!pane) {
+      this.#forget(id, managed);
+      return null;
+    }
+    return pane.dead
+      ? { state: 'exited', exitCode: pane.status, signal: pane.signal }
+      : { state: 'running', exitCode: null, signal: null };
+  }
+
+  output(id) {
+    const managed = this.processes.get(id);
+    if (!managed || managed.pending || !this.#paneState(managed)) return null;
+    const result = this.#tmuxQuery(['capture-pane', '-p', '-S', '-200', '-t', managed.paneId], {
+      encoding: 'utf8', maxBuffer: 1024 * 1024,
+    });
+    return result?.stdout ?? null;
+  }
+
   start(project) {
     this.#requireLifecycleWork();
     return this.withProjectLock(project.id, () => this.#start(project));

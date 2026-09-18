@@ -38,10 +38,12 @@ async function readJson(request) {
 }
 
 async function present(project, processManager) {
+  const process = processManager.processInfo(project.id);
   return {
     ...project,
     name: path.basename(project.path),
-    status: processManager.isRunning(project.id) ? 'running' : 'stopped',
+    status: process?.state === 'running' ? 'running' : 'stopped',
+    process,
     git: await getGitMetadata(project.path),
   };
 }
@@ -56,6 +58,7 @@ export function createAppServer(
       const url = new URL(request.url, 'http://localhost');
       const match = url.pathname.match(/^\/api\/projects\/([^/]+)$/);
       const actionMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/(start|stop|restart)$/);
+      const outputMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/output$/);
       const gitActionMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/git\/(branches|fetch|update|switch)$/);
       const bulkWorktreeMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/git\/worktrees\/removal$/);
       const worktreeMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/git\/worktrees$/);
@@ -75,6 +78,13 @@ export function createAppServer(
         const id = decodeURIComponent(actionMatch[1]);
         const project = await processManager.perform(id, actionMatch[2], () => store.get(id));
         sendJson(response, 200, await present(project, processManager));
+        return;
+      }
+
+      if (outputMatch && request.method === 'GET') {
+        const id = decodeURIComponent(outputMatch[1]);
+        if (!await store.get(id)) throw new ProjectError('not_found', 'Project not found.');
+        sendJson(response, 200, { output: processManager.output(id) });
         return;
       }
 

@@ -28,6 +28,11 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .status.running { background: #174a38; color: #9ef0cb; }
 .status.stopped { background: #343b49; color: #c7cedb; }
 .project .actions { margin-top: 1rem; }
+.process-output { margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid #2a3242; }
+.process-output h4 { margin: 0 0 .6rem; }
+.process-output button + button { margin-left: .5rem; }
+.exit-result { margin: 0 0 .7rem; }
+.process-output-text { max-height: 18rem; overflow: auto; padding: .75rem; background: #0f1218; border-radius: 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .empty { color: #aeb7c7; }
 .git-state { margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid #2a3242; }
 .git-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
