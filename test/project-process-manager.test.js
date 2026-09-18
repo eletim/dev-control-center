@@ -591,6 +591,21 @@ test('retains a completed command window and its output', async (t) => {
   assert.equal(manager.processes.has(project.id), false);
 });
 
+test('preserves a Start Command termination signal in the tmux pane', async (t) => {
+  const projectPath = await mkdtemp(path.join(os.tmpdir(), 'dcc-signaled-exit-'));
+  const project = { id: 'signaled', path: projectPath, startCommand: 'kill -TERM $$' };
+  const manager = createManager();
+  t.after(() => manager.stopAll());
+
+  await assert.rejects(manager.start(project), (error) => {
+    assert.equal(error.code, 'start_failed');
+    assert.match(error.message, /signal SIGTERM/);
+    return true;
+  });
+  assert.equal(manager.isRunning(project.id), false);
+  assert.equal(manager.processInfo(project.id).signal, 'SIGTERM');
+});
+
 test('rejects commands that fail immediately and retains their windows', async (t) => {
   const projectPath = await mkdtemp(path.join(os.tmpdir(), 'dcc-failed-start-'));
   const manager = createManager({ startupDelay: 100 });

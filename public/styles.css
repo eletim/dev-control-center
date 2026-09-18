@@ -15,14 +15,24 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 #message { min-height: 1.25rem; margin: 1rem 0 0; color: #ffacac; }
 .section-heading { display: flex; justify-content: space-between; align-items: center; margin: 2rem 0 1rem; }
 .section-heading h2 { margin: 0; }
+.project-search { margin-bottom: .5rem; }
+#project-count { margin: 0 0 1rem; font-size: .85rem; }
 .projects { display: grid; gap: 1rem; }
+.project-heading { display: flex; align-items: start; justify-content: space-between; gap: 1rem; }
 .project h3 { margin: 0 0 .4rem; }
+.project.active-project { border-color: #8ba4ff; }
+.active-label { display: inline-block; margin-left: .5rem; color: #aebeff; font-size: .8rem; font-weight: 700; }
 .project code { word-break: break-all; color: #bdc9f5; }
 .meta { color: #aeb7c7; }
 .status { display: inline-block; margin-bottom: .75rem; border-radius: 999px; padding: .2rem .55rem; font-size: .8rem; font-weight: 700; }
 .status.running { background: #174a38; color: #9ef0cb; }
 .status.stopped { background: #343b49; color: #c7cedb; }
 .project .actions { margin-top: 1rem; }
+.process-output { margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid #2a3242; }
+.process-output h4 { margin: 0 0 .6rem; }
+.process-output button + button { margin-left: .5rem; }
+.exit-result { margin: 0 0 .7rem; }
+.process-output-text { max-height: 18rem; overflow: auto; padding: .75rem; background: #0f1218; border-radius: 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .empty { color: #aeb7c7; }
 .git-state { margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid #2a3242; }
 .git-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
@@ -33,16 +43,20 @@ button.compact { padding: .45rem .7rem; }
 .git-metadata dt { color: #aeb7c7; }
 .git-metadata dd { margin: 0; overflow-wrap: anywhere; }
 .branch-controls { display: grid; grid-template-columns: minmax(12rem, 1fr) auto; gap: .5rem; align-items: end; }
+.worktree-create { grid-template-columns: repeat(3, minmax(0, 1fr)) auto; align-items: end; margin: .5rem 0 1rem; }
+.worktree-create button { align-self: end; }
 .worktree-list { display: grid; gap: .5rem; }
 .worktree-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .65rem; background: #141923; border-radius: 6px; }
+.worktree-row.current-worktree { outline: 1px solid #8ba4ff; }
+.worktree-toggle { margin-top: .5rem; }
 .worktree-metadata { margin: 0; min-width: 0; }
-.worktree-row button { flex: 0 0 auto; }
+.worktree-row .actions { margin: 0; flex: 0 0 auto; }
 .inline-message, .project-message { margin: .7rem 0 0; }
 .error { color: #ffacac; }
 .success { color: #9ef0cb; }
 .unavailable { color: #d1bb83; }
 @media (max-width: 650px) {
-  form, .branch-controls { grid-template-columns: 1fr; }
+  form, .branch-controls, .worktree-create { grid-template-columns: 1fr; }
   .branch-controls button { justify-self: start; }
   .worktree-row { align-items: stretch; flex-direction: column; }
   .worktree-row button { align-self: start; }

@@ -2,6 +2,8 @@ import { spawn, spawnSync } from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
 
 const command = process.argv[2];
+const tmuxPath = process.argv[3];
+const tmuxSocketName = process.argv[4];
 const procDirectory = process.env.DEV_CONTROL_CENTER_PROC_DIRECTORY || '/proc';
 
 function processGroupFromPs(pid) {
@@ -21,11 +23,22 @@ function ownProcessGroup() {
 
 const processGroupId = ownProcessGroup();
 // Stay available as the group's identity while command processes handle graceful shutdown.
-process.on('SIGTERM', () => {});
+const holdProcessGroup = () => {};
+process.on('SIGTERM', holdProcessGroup);
 const child = spawn(command, { shell: true, stdio: 'inherit' });
 
-function finish(status) {
-  process.exit(status);
+function finish(status, signal) {
+  if (signal) {
+    if (tmuxPath && process.env.TMUX_PANE) {
+      const socket = tmuxSocketName ? ['-L', tmuxSocketName] : [];
+      spawnSync(tmuxPath, [...socket, 'set-option', '-p', '-t', process.env.TMUX_PANE,
+        '@dcc_command_signal', signal], { stdio: 'ignore' });
+    }
+    process.off('SIGTERM', holdProcessGroup);
+    process.kill(process.pid, signal);
+    return;
+  }
+  process.exit(status ?? 0);
 }
 
 function hasLiveCommandProcess() {
@@ -60,6 +73,6 @@ child.once('exit', (code, signal) => {
   const monitor = setInterval(() => {
     if (hasLiveCommandProcess()) return;
     clearInterval(monitor);
-    finish(code ?? (signal ? 1 : 0));
+    finish(code, signal);
   }, 25);
 });

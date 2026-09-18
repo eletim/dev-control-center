@@ -62,6 +62,8 @@ function createDocument() {
     ['cancel', new AcceptanceElement('button')],
     ['save-project', new AcceptanceElement('button')],
     ['refresh', new AcceptanceElement('button')],
+    ['project-search', new AcceptanceElement('input')],
+    ['project-count', new AcceptanceElement()],
     ['form-title', new AcceptanceElement('h2')],
   ]);
   return {
@@ -87,7 +89,7 @@ function findElements(root, text) {
 }
 
 function findWorktreeRow(root, worktreePath) {
-  if (root.className === 'worktree-row' && findElement(root, worktreePath)) return root;
+  if (root.className.split(' ').includes('worktree-row') && findElement(root, worktreePath)) return root;
   for (const child of root.children) {
     const match = findWorktreeRow(child, worktreePath);
     if (match) return match;
@@ -105,7 +107,7 @@ function findTag(root, tagName) {
 }
 
 function findProject(document, name) {
-  return document.elements.get('projects').children.find((card) => card.children[0]?.textContent === name);
+  return document.elements.get('projects').children.find((card) => findElement(card, name));
 }
 
 async function waitFor(predicate, timeout = 2000) {

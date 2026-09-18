@@ -30,6 +30,14 @@ Completed and failed windows remain available until the project is started again
 deleted, or Dev Control Center performs another explicit cleanup action. Set
 `DCC_TMUX_SESSION` to use a different session name.
 
+The dashboard's Running and Stopped labels describe the process group DCC
+started in its managed tmux window, including background child processes.
+Stopped also covers completed commands and projects started outside DCC; it does
+not assert that no related process exists elsewhere. Project and Git state
+refresh every 15 seconds while the dashboard is visible and when the tab becomes
+visible again. Refresh updates
+the display immediately.
+
 DCC uses `DCC_HOST` and `DCC_PORT` only for its own listener. Generic `HOST`
 and `PORT` remain available for projects; for example, PurpleMux uses port 8022
 by default. A Start Command such as `PORT=9000 ./start.sh` retains its explicit
@@ -66,6 +74,13 @@ actions modify the selected repositories, so only register trusted paths and
 commands. Git branch switching and fast-forward updates require a clean working
 tree; the application never offers reset, force-push, or arbitrary Git command
 execution.
+
+In each project's Git section, create a worktree at an absolute path using a
+new branch from HEAD or an existing local branch. The list shows each worktree's
+branch and whether it has uncommitted changes. **Open as project** registers a
+worktree with the source project's Start Command and focuses its project card;
+you can edit that command afterward. Worktree removal still requires a clean,
+unregistered checkout and never forces removal.
 
 ## Test
 

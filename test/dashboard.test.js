@@ -39,7 +39,7 @@ class TestElement {
     this[name] = value;
   }
 
-  focus() {}
+  focus() { if (this.ownerDocument && !this.disabled) this.ownerDocument.activeElement = this; }
 
   reset() {}
 
@@ -60,13 +60,25 @@ function createTestDocument() {
     ['cancel', new TestElement('button')],
     ['save-project', new TestElement('button')],
     ['refresh', new TestElement('button')],
+    ['project-search', new TestElement('input')],
+    ['project-count', new TestElement()],
     ['form-title', new TestElement('h2')],
   ]);
-  return {
+  const listeners = new Map();
+  const document = {
     elements,
-    createElement: (tagName) => new TestElement(tagName),
+    hidden: false,
+    createElement: (tagName) => {
+      const element = new TestElement(tagName);
+      element.ownerDocument = document;
+      return element;
+    },
     querySelector: (selector) => elements.get(selector.slice(1)),
+    addEventListener: (type, listener) => { listeners.set(type, listener); },
+    dispatch: (type) => listeners.get(type)?.(),
   };
+  for (const element of elements.values()) element.ownerDocument = document;
+  return document;
 }
 
 function findElement(root, text) {
@@ -93,8 +105,17 @@ function findTag(root, tagName) {
   return null;
 }
 
+function findFocusKey(root, key) {
+  if (root.focusKey === key) return root;
+  for (const child of root.children) {
+    const match = findFocusKey(child, key);
+    if (match) return match;
+  }
+  return null;
+}
+
 function findWorktreeRow(root, worktreePath) {
-  if (root.className === 'worktree-row' && findElement(root, worktreePath)) return root;
+  if (root.className.split(' ').includes('worktree-row') && findElement(root, worktreePath)) return root;
   for (const child of root.children) {
     const match = findWorktreeRow(child, worktreePath);
     if (match) return match;
@@ -119,6 +140,235 @@ async function waitFor(predicate, timeout = 2000) {
 function jsonResponse(body, status = 200) {
   return { ok: status >= 200 && status < 300, status, json: async () => body };
 }
+
+test('shows exit reason and lets a stopped project display its tmux output', async () => {
+  const document = createTestDocument();
+  const project = {
+    id: 'one', name: 'demo', path: '/demo', startCommand: 'run', status: 'stopped',
+    process: { state: 'exited', exitCode: 23, signal: null },
+    git: { isRepository: false },
+  };
+  const fetchImpl = async (url) => {
+    if (url === '/api/projects') return jsonResponse([project]);
+    if (url.endsWith('/output')) return jsonResponse({ output: 'failure on stderr\n' });
+    throw new Error(`Unexpected request: ${url}`);
+  };
+  await initDashboard(document, fetchImpl, () => true, { setIntervalImpl: () => null }).ready;
+  const projects = document.elements.get('projects');
+  assert.ok(findElement(projects, 'Exited abnormally (exit code 23).'));
+  await findElement(projects, 'View output').dispatch('click');
+  assert.ok(findElement(projects, 'failure on stderr'));
+  assert.ok(findElement(projects, 'Refresh output'));
+  project.process = { state: 'exited', exitCode: null, signal: 'SIGTERM' };
+  await document.elements.get('refresh').dispatch('click');
+  assert.ok(findElement(projects, 'Exited abnormally (signal SIGTERM).'));
+});
+
+test('ignores output from the previous run after Start or Restart', async () => {
+  for (const action of ['Start', 'Restart']) {
+    const document = createTestDocument();
+    const project = {
+      id: 'one', name: 'demo', path: '/demo', startCommand: 'run',
+      status: action === 'Start' ? 'stopped' : 'running',
+      git: { isRepository: false },
+    };
+    const oldOutput = deferred();
+    let outputRequests = 0;
+    const fetchImpl = async (url, options = {}) => {
+      if (url === '/api/projects') return jsonResponse([project]);
+      if (url.endsWith('/output')) {
+        outputRequests += 1;
+        return outputRequests === 1 ? oldOutput.promise : jsonResponse({ output: 'new run output' });
+      }
+      if (options.method === 'POST') {
+        project.status = 'running';
+        return jsonResponse(project);
+      }
+      if (url === '/api/projects/one') return jsonResponse(project);
+      throw new Error(`Unexpected request: ${url}`);
+    };
+    await initDashboard(document, fetchImpl, () => true, { setIntervalImpl: () => null }).ready;
+    const projects = document.elements.get('projects');
+    await findElement(projects, 'View output').dispatch('click');
+    await findElement(projects, action).dispatch('click');
+    oldOutput.resolve(jsonResponse({ output: 'old run output' }));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(findElement(projects, 'View output'), action);
+    assert.equal(findElement(projects, 'old run output'), null, action);
+    await findElement(projects, 'View output').dispatch('click');
+    await waitFor(() => Boolean(findElement(projects, 'new run output')));
+  }
+});
+
+test('refreshes external Git and process changes on a timer and when the tab becomes visible', async () => {
+  const document = createTestDocument();
+  const project = {
+    id: 'one', name: 'demo', path: '/demo', startCommand: 'npm start', status: 'stopped',
+    git: { isRepository: true, branch: 'main', clean: true },
+  };
+  let current = project;
+  let listRequests = 0;
+  let tick;
+  const fetchImpl = async (url) => {
+    if (url === '/api/projects') {
+      listRequests += 1;
+      return jsonResponse([current]);
+    }
+    if (url.endsWith('/git/branches')) return jsonResponse({ branches: ['main', 'topic'] });
+    return jsonResponse({ worktrees: [{ path: '/demo', branch: current.git.branch }] });
+  };
+  const dashboard = initDashboard(document, fetchImpl, () => true, {
+    setIntervalImpl: (callback, delay) => {
+      assert.equal(delay, 15_000);
+      tick = callback;
+    },
+  });
+  await dashboard.ready;
+  current = { ...project, status: 'running', git: { ...project.git, branch: 'topic', clean: false } };
+  await tick();
+  await waitFor(() => findElement(document.elements.get('projects'), 'Running')
+    && findElement(document.elements.get('projects'), 'topic'));
+  assert.equal(listRequests, 2);
+
+  document.hidden = true;
+  tick();
+  assert.equal(listRequests, 2);
+  document.hidden = false;
+  document.dispatch('visibilitychange');
+  await waitFor(() => listRequests === 3);
+});
+
+test('keeps a selected branch available for Switch across automatic refreshes', async () => {
+  const document = createTestDocument();
+  const project = {
+    id: 'one', name: 'demo', path: '/demo', startCommand: 'npm start', status: 'stopped',
+    git: { isRepository: true, branch: 'main', clean: true },
+  };
+  let tick;
+  let switchedBranch;
+  const fetchImpl = async (url, options = {}) => {
+    if (url === '/api/projects') return jsonResponse([project]);
+    if (url.endsWith('/git/branches')) return jsonResponse({ branches: ['main', 'topic'] });
+    if (url.endsWith('/git/worktrees')) return jsonResponse({ worktrees: [] });
+    if (url.endsWith('/git/switch') && options.method === 'POST') {
+      switchedBranch = JSON.parse(options.body).branch;
+    }
+    return jsonResponse(project);
+  };
+  const dashboard = initDashboard(document, fetchImpl, () => true, {
+    setIntervalImpl: (callback) => { tick = callback; },
+  });
+  await dashboard.ready;
+  let card = document.elements.get('projects').children[0];
+  const select = findTag(card, 'select');
+  select.value = 'topic';
+  await select.dispatch('change');
+  select.focus();
+  assert.equal(findElement(card, 'Switch').disabled, false);
+
+  tick();
+  await waitFor(() => document.elements.get('projects').children[0] !== card
+    && !document.elements.get('refresh').disabled);
+  card = document.elements.get('projects').children[0];
+  assert.equal(findTag(card, 'select').value, 'topic');
+  assert.equal(document.activeElement, findTag(card, 'select'));
+  assert.equal(findElement(card, 'Switch').disabled, false);
+  await findElement(card, 'Switch').dispatch('click');
+  assert.equal(switchedBranch, 'topic');
+});
+
+test('periodic refresh returns focus to project action buttons', async () => {
+  const document = createTestDocument();
+  const project = { id: 'one', name: 'demo', path: '/demo', startCommand: 'true', status: 'stopped',
+    git: { isRepository: false } };
+  let tick;
+  let requests = 0;
+  const fetchImpl = async (url) => {
+    if (url === '/api/projects') requests += 1;
+    return jsonResponse(url === '/api/projects' ? [project] : project);
+  };
+  await initDashboard(document, fetchImpl, () => true, {
+    setIntervalImpl: (callback) => { tick = callback; },
+  }).ready;
+  for (const label of ['Start', 'Edit', 'Delete']) {
+    const previous = findElement(document.elements.get('projects'), label);
+    previous.focus();
+    tick();
+    await waitFor(() => requests >= 2 && !document.elements.get('refresh').disabled
+      && document.activeElement !== previous);
+    assert.equal(document.activeElement, findElement(document.elements.get('projects'), label));
+    requests = 1;
+  }
+});
+
+test('runs a visibility refresh after an active project operation settles', async () => {
+  const document = createTestDocument();
+  const project = {
+    id: 'one', name: 'demo', path: '/demo', startCommand: 'npm start', status: 'stopped',
+    git: { isRepository: false },
+  };
+  const startResponse = deferred();
+  let listRequests = 0;
+  const fetchImpl = async (url, options = {}) => {
+    if (url === '/api/projects') {
+      listRequests += 1;
+      return jsonResponse([{ ...project, name: listRequests === 1 ? 'demo' : 'updated' }]);
+    }
+    if (options.method === 'POST') return startResponse.promise;
+    return jsonResponse({ ...project, status: 'running' });
+  };
+  const dashboard = initDashboard(document, fetchImpl, () => true, { setIntervalImpl: () => {} });
+  await dashboard.ready;
+  const action = findElement(document.elements.get('projects'), 'Start').dispatch('click');
+  document.dispatch('visibilitychange');
+  assert.equal(listRequests, 1);
+
+  startResponse.resolve(jsonResponse({ ...project, status: 'running' }));
+  await action;
+  await waitFor(() => listRequests === 2);
+  assert.ok(findElement(document.elements.get('projects'), 'updated'));
+});
+
+test('reports an already exited Start Command without claiming it is running', async () => {
+  const document = createTestDocument();
+  const project = {
+    id: 'one', name: 'demo', path: '/demo', startCommand: 'true', status: 'stopped',
+    git: { isRepository: false },
+  };
+  const fetchImpl = async (url) => jsonResponse(url === '/api/projects' ? [project] : project);
+  const dashboard = initDashboard(document, fetchImpl, () => true, { setIntervalImpl: () => {} });
+  await dashboard.ready;
+  await findElement(document.elements.get('projects'), 'Start').dispatch('click');
+  const card = document.elements.get('projects').children[0];
+  assert.ok(findElement(card, 'Stopped'));
+  assert.ok(findElement(card, 'Start Command exited; no DCC-managed process is running.'));
+});
+
+test('updates Start feedback when a command exits after the action response', async () => {
+  const document = createTestDocument();
+  const project = {
+    id: 'one', name: 'demo', path: '/demo', startCommand: 'npm start', status: 'stopped',
+    git: { isRepository: false },
+  };
+  let status = 'stopped';
+  let tick;
+  const fetchImpl = async (url, options = {}) => {
+    if (url === '/api/projects') return jsonResponse([{ ...project, status }]);
+    if (options.method === 'POST') status = 'running';
+    return jsonResponse({ ...project, status });
+  };
+  const dashboard = initDashboard(document, fetchImpl, () => true, {
+    setIntervalImpl: (callback) => { tick = callback; },
+  });
+  await dashboard.ready;
+  await findElement(document.elements.get('projects'), 'Start').dispatch('click');
+  assert.ok(findElement(document.elements.get('projects'), 'Start complete.'));
+  status = 'stopped';
+  tick();
+  await waitFor(() => findElement(document.elements.get('projects'),
+    'Start Command exited; no DCC-managed process is running.'));
+  assert.ok(findElement(document.elements.get('projects'), 'Stopped'));
+});
 
 test('describes available and unavailable Git state explicitly', () => {
   assert.deepEqual(describeGit(null), {
@@ -368,7 +618,7 @@ test('lists worktrees and removes one only after confirmation before refreshing 
   const projects = document.elements.get('projects');
   assert.ok(findElement(projects, project.path));
   assert.ok(findElement(projects, linkedPath));
-  assert.equal(findElements(projects, 'Branch').length, 3);
+  assert.equal(findElements(projects, 'Branch').length, 4);
   assert.ok(findElement(projects, 'main'));
   assert.ok(findElement(projects, 'topic'));
   assert.equal(findElements(projects, 'Remove Worktree').length, 1);
@@ -390,6 +640,60 @@ test('lists worktrees and removes one only after confirmation before refreshing 
   assert.equal(requests.filter(({ url }) => url.endsWith('/git/branches')).length, 2);
   assert.equal(requests.filter(({ url, method }) => method === 'GET' && url.endsWith('/git/worktrees')).length, 2);
   assert.equal(requests.some(({ url }) => url.includes('/git/switch')), false);
+});
+
+test('creates a worktree and opens it as a focused project', async () => {
+  const document = createTestDocument();
+  const main = {
+    id: 'main', name: 'demo', path: '/code/demo', startCommand: 'npm start', status: 'stopped',
+    git: { isRepository: true, repositoryIdentity: '/code/demo/.git', branch: 'main', clean: true },
+  };
+  const linked = {
+    ...main, id: 'linked', name: 'demo-topic', path: '/code/demo-topic',
+    git: { ...main.git, branch: 'topic' },
+  };
+  const projects = [main];
+  let worktrees = [{ path: main.path, branch: 'main', clean: true }];
+  const requests = [];
+  const fetchImpl = async (url, options = {}) => {
+    const method = options.method || 'GET';
+    requests.push({ url, method, body: options.body });
+    if (url === '/api/projects' && method === 'GET') return jsonResponse(projects);
+    if (url === '/api/projects/main/git/worktrees/open' && method === 'POST') {
+      projects.push(linked);
+      return jsonResponse(linked, 201);
+    }
+    if (url.endsWith('/git/worktrees') && method === 'POST') {
+      worktrees = [...worktrees, { path: linked.path, branch: 'topic', clean: true }];
+      return jsonResponse({ path: linked.path }, 201);
+    }
+    if (url.endsWith('/git/worktrees')) return jsonResponse({ worktrees });
+    if (url.endsWith('/git/branches')) return jsonResponse({ branches: ['main', 'topic'] });
+    if (url === `/api/projects/${main.id}`) return jsonResponse(main);
+    if (url === `/api/projects/${linked.id}`) return jsonResponse(linked);
+    throw new Error(`Unexpected request: ${url}`);
+  };
+  const dashboard = initDashboard(document, fetchImpl, () => true);
+  await dashboard.ready;
+  const root = document.elements.get('projects');
+  const pathInput = findTag(findElement(root, 'New worktree path'), 'input');
+  pathInput.value = linked.path;
+  await pathInput.dispatch('input');
+  const branchInput = findTag(findElements(root, 'Branch').find((element) => element.tagName === 'LABEL'), 'input');
+  branchInput.value = 'topic';
+  await branchInput.dispatch('input');
+  await findElement(root, 'Create worktree').dispatch('click');
+  assert.deepEqual(JSON.parse(requests.find(({ method, url }) => method === 'POST'
+    && url.endsWith('/git/worktrees')).body), {
+    path: linked.path, branch: 'topic', createBranch: true,
+  });
+  const row = findWorktreeRow(root, linked.path);
+  assert.ok(findElement(row, 'Clean'));
+  await findElement(row, 'Open as project').dispatch('click');
+  assert.deepEqual(JSON.parse(requests.find(({ method, url }) => method === 'POST'
+    && url === '/api/projects/main/git/worktrees/open').body), { path: linked.path });
+  await waitFor(() => Boolean(findElement(root, 'Current target') && findElement(root, linked.path)));
+  assert.equal(document.elements.get('project-search').value, '');
 });
 
 test('Git actions and worktree removal refresh every project from the same repository', async () => {
@@ -650,4 +954,164 @@ test('bulk worktree removal confirms the preview count and reports removed and r
   assert.deepEqual(JSON.parse(removal.body), { paths: ['/topic'] });
   assert.ok(findElement(projects, 'Removed 1 worktrees: /topic. Retained 1 worktrees: /demo: Registered project.'));
   assert.equal(requests.filter(({ url }) => url.endsWith('/git/worktrees')).length, 2);
+});
+
+test('search filters projects by name or path and project collapse preserves the visible target', async () => {
+  const document = createTestDocument();
+  const projects = [
+    { id: 'one', name: 'Alpha', path: '/code/alpha', startCommand: 'npm start', status: 'stopped' },
+    { id: 'two', name: 'Beta', path: '/work/special', startCommand: 'npm start', status: 'stopped' },
+  ];
+  const fetchImpl = async (url) => jsonResponse(url === '/api/projects' ? projects : projects[0]);
+  await initDashboard(document, fetchImpl, () => true).ready;
+  const list = document.elements.get('projects');
+  const search = document.elements.get('project-search');
+  search.value = 'SPECIAL';
+  await search.dispatch('input');
+  assert.equal(list.children.length, 1);
+  assert.ok(findElement(list, 'Beta'));
+  assert.equal(document.elements.get('project-count').textContent, '1 of 2 projects shown');
+
+  await findElement(list, 'Edit').dispatch('click');
+  assert.ok(findElement(list, 'Current target'));
+  assert.equal(document.elements.get('form-title').textContent, 'Edit project: Beta');
+  search.value = 'alpha';
+  await search.dispatch('input');
+  assert.equal(findElement(list, 'Beta'), null);
+  assert.equal(document.elements.get('form-title').textContent, 'Edit project: Beta');
+  search.value = 'special';
+  await search.dispatch('input');
+  await findElement(list, 'Collapse project').dispatch('click');
+  assert.ok(findElement(list, 'Beta'));
+  assert.ok(findElement(list, '/work/special'));
+  assert.ok(findElement(list, 'Current target'));
+  assert.equal(findElement(list, 'Edit'), null);
+  await findElement(list, 'Expand project').dispatch('click');
+  assert.ok(findElement(list, 'Edit'));
+
+  search.value = 'missing';
+  await search.dispatch('input');
+  assert.ok(findElement(list, '<p class="empty">No projects match your search.</p>'));
+  search.value = 'alpha';
+  await search.dispatch('input');
+  assert.ok(findElement(list, 'Alpha'));
+});
+
+test('long worktree lists show the registered project path and expand on demand', async () => {
+  const document = createTestDocument();
+  const project = { id: 'one', name: 'Alpha', path: '/code/linked/packages/app',
+    startCommand: 'npm start', status: 'stopped', git: { isRepository: true, branch: 'linked', clean: true } };
+  const listedProjectPath = '/alias/linked';
+  const worktrees = Array.from({ length: 8 }, (_, index) => ({
+    path: index === 7 ? listedProjectPath : `/code/topic-${index}`,
+    branch: index === 7 ? 'linked' : `topic-${index}`,
+    isProjectWorktree: index === 7,
+  }));
+  const fetchImpl = async (url) => {
+    if (url === '/api/projects') return jsonResponse([project]);
+    if (url.endsWith('/git/branches')) return jsonResponse({ branches: ['linked'] });
+    if (url.endsWith('/git/worktrees')) return jsonResponse({ worktrees });
+    return jsonResponse(project);
+  };
+  await initDashboard(document, fetchImpl, () => true).ready;
+  const list = document.elements.get('projects');
+  const registeredRow = findWorktreeRow(list, listedProjectPath);
+  assert.ok(registeredRow);
+  assert.ok(findElement(list, 'Project worktree'));
+  assert.equal(findElement(registeredRow, 'Remove Worktree'), null);
+  assert.equal(findElements(list, 'Remove Worktree').length, 4);
+  assert.equal(findWorktreeRow(list, '/code/topic-6'), null);
+  await findElement(list, 'Show all 8 worktrees').dispatch('click');
+  assert.equal(findElements(list, 'Remove Worktree').length, 7);
+  await findElement(list, 'Show fewer worktrees').dispatch('click');
+  assert.equal(findElements(list, 'Remove Worktree').length, 4);
+});
+
+test('automatic refresh retains focus and worktree path and branch drafts', async () => {
+  const document = createTestDocument();
+  const project = { id: 'one', name: 'demo', path: '/demo', startCommand: 'true', status: 'stopped',
+    git: { isRepository: true, repositoryIdentity: 'repo' } };
+  let tick;
+  let lists = 0;
+  const fetchImpl = async (url) => {
+    if (url === '/api/projects') { lists += 1; return jsonResponse([project]); }
+    if (url.endsWith('/git/branches')) return jsonResponse({ branches: [] });
+    return jsonResponse({ worktrees: [] });
+  };
+  await initDashboard(document, fetchImpl, () => true, {
+    setIntervalImpl: (callback) => { tick = callback; },
+  }).ready;
+  const path = findElement(document.elements.get('projects'), 'New worktree path').children[0];
+  path.value = '/demo/topic';
+  await path.dispatch('input');
+  path.focus();
+  tick();
+  await waitFor(() => lists === 2);
+  await waitFor(() => document.activeElement !== path);
+  assert.equal(document.activeElement.value, '/demo/topic');
+  assert.equal(document.activeElement.focusKey, 'one:path');
+  const branchInput = findFocusKey(document.elements.get('projects'), 'one:branch');
+  branchInput.value = 'topic';
+  await branchInput.dispatch('input');
+  branchInput.focus();
+  await waitFor(() => !document.elements.get('refresh').disabled);
+  tick();
+  await waitFor(() => lists === 3);
+  await waitFor(() => document.activeElement !== branchInput);
+  assert.equal(document.activeElement.value, 'topic');
+  assert.equal(document.activeElement.focusKey, 'one:branch');
+});
+
+test('automatic refresh discards output when another client starts a new managed run', async () => {
+  const document = createTestDocument();
+  let runId = 'first';
+  let tick;
+  const project = { id: 'one', name: 'demo', path: '/demo', startCommand: 'true', status: 'running',
+    git: { isRepository: false } };
+  const fetchImpl = async (url) => url === '/api/projects'
+    ? jsonResponse([{ ...project, process: { state: 'running', runId } }])
+    : jsonResponse({ output: 'first run output' });
+  await initDashboard(document, fetchImpl, () => true, {
+    setIntervalImpl: (callback) => { tick = callback; },
+  }).ready;
+  await findElement(document.elements.get('projects'), 'View output').dispatch('click');
+  assert.ok(findElement(document.elements.get('projects'), 'first run output'));
+  runId = 'second';
+  tick();
+  await waitFor(() => !findElement(document.elements.get('projects'), 'first run output'));
+  assert.ok(findElement(document.elements.get('projects'), 'View output'));
+});
+
+test('shared repository projects use one branch and worktree snapshot per refresh', async () => {
+  const document = createTestDocument();
+  const projects = ['main', 'linked'].map((id) => ({ id, name: id, path: `/code/${id}`,
+    startCommand: 'true', status: 'stopped',
+    git: { isRepository: true, repositoryIdentity: 'shared' } }));
+  let tick;
+  let branchRequests = 0;
+  let worktreeRequests = 0;
+  const fetchImpl = async (url) => {
+    if (url === '/api/projects') return jsonResponse(projects);
+    if (url.endsWith('/git/branches')) {
+      branchRequests += 1;
+      return jsonResponse({ branches: ['main', 'topic'] });
+    }
+    worktreeRequests += 1;
+    return jsonResponse({ worktrees: [
+      { path: '/alias/main', canonicalPath: '/code/main', isProjectWorktree: true },
+      { path: '/code/linked', canonicalPath: '/code/linked', isProjectWorktree: false },
+    ] });
+  };
+  await initDashboard(document, fetchImpl, () => true, {
+    setIntervalImpl: (callback) => { tick = callback; },
+  }).ready;
+  assert.equal(branchRequests, 1);
+  assert.equal(worktreeRequests, 1);
+  const cards = document.elements.get('projects').children;
+  assert.ok(findElement(findWorktreeRow(cards[0], '/alias/main'), 'Project worktree'));
+  assert.ok(findElement(findWorktreeRow(cards[1], '/code/linked'), 'Project worktree'));
+  tick();
+  await waitFor(() => branchRequests === 2 && worktreeRequests === 2);
+  assert.equal(branchRequests, 2);
+  assert.equal(worktreeRequests, 2);
 });
