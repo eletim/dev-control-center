@@ -618,7 +618,7 @@ test('creates a worktree and opens it as a focused project', async () => {
     const method = options.method || 'GET';
     requests.push({ url, method, body: options.body });
     if (url === '/api/projects' && method === 'GET') return jsonResponse(projects);
-    if (url === '/api/projects' && method === 'POST') {
+    if (url === '/api/projects/main/git/worktrees/open' && method === 'POST') {
       projects.push(linked);
       return jsonResponse(linked, 201);
     }
@@ -650,9 +650,7 @@ test('creates a worktree and opens it as a focused project', async () => {
   assert.ok(findElement(row, 'Clean'));
   await findElement(row, 'Open as project').dispatch('click');
   assert.deepEqual(JSON.parse(requests.find(({ method, url }) => method === 'POST'
-    && url === '/api/projects').body), {
-    path: linked.path, startCommand: main.startCommand,
-  });
+    && url === '/api/projects/main/git/worktrees/open').body), { path: linked.path });
   await waitFor(() => Boolean(findElement(root, 'Current target') && findElement(root, linked.path)));
   assert.equal(document.elements.get('project-search').value, '');
 });

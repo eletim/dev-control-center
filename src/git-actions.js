@@ -245,9 +245,19 @@ function pathContains(rootPath, candidatePath) {
     && !relativePath.startsWith(`..${path.sep}`) && !path.isAbsolute(relativePath));
 }
 
+async function belongsToRepository(worktreePath, expectedIdentity) {
+  try {
+    return await repositoryIdentity(worktreePath) === expectedIdentity
+      && await worktreeRoot(worktreePath) === await realpath(worktreePath);
+  } catch {
+    return false;
+  }
+}
+
 export async function listProjectWorktrees(projectPath) {
   const worktrees = await listWorktrees(projectPath);
   const canonicalProjectPath = await realpath(projectPath);
+  const identity = await repositoryIdentity(projectPath);
   return Promise.all(worktrees.map(async (worktree) => {
     let isProjectWorktree = false;
     try {
@@ -256,13 +266,26 @@ export async function listProjectWorktrees(projectPath) {
       // Missing worktrees remain visible but cannot contain the project.
     }
     let clean = null;
-    try {
-      clean = (await git(worktree.path, ['status', '--porcelain'])) === '';
-    } catch {
-      // Missing worktrees and bare main repositories have no working tree status.
+    if (await belongsToRepository(worktree.path, identity)) {
+      try {
+        clean = (await git(worktree.path, ['status', '--porcelain'])) === '';
+      } catch {
+        // The worktree may have disappeared after identity was checked.
+      }
     }
     return { ...worktree, isProjectWorktree, clean };
   }));
+}
+
+export async function openWorktree(repositoryPath, requestedPath) {
+  if (typeof requestedPath !== 'string' || !requestedPath) {
+    throw new ProjectError('invalid_worktree', 'An existing worktree path is required.');
+  }
+  const worktree = await findRegisteredWorktree(await listWorktrees(repositoryPath), requestedPath);
+  if (!worktree || !await belongsToRepository(worktree.path, await repositoryIdentity(repositoryPath))) {
+    throw new ProjectError('invalid_worktree', 'Worktree no longer belongs to this repository.');
+  }
+  return worktree.canonicalPath;
 }
 
 export async function createWorktree(repositoryPath, input) {

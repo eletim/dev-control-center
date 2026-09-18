@@ -621,29 +621,27 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
 
   async function openProjectWorktree(project, worktree) {
     if (projectsAreBusy([project]) || savingProject) return;
-    let target = projects.find((candidate) => candidate.path === worktree.path);
+    savingProject = true;
+    projectMessages.set(project.id, { text: 'Opening worktree as project…', error: false });
+    render();
+    let target;
+    try {
+      target = await requestJson(`/api/projects/${encodeURIComponent(project.id)}/git/worktrees/open`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: worktree.path }),
+      }, fetchImpl);
+      replaceProject(target);
+      projectMessages.set(project.id, { text: 'Worktree opened as project.', error: false });
+      projectsRefreshRequired = true;
+    } catch (error) {
+      projectMessages.set(project.id, { text: actionError('Open worktree', error), error: true });
+    } finally {
+      savingProject = false;
+    }
     if (!target) {
-      savingProject = true;
-      projectMessages.set(project.id, { text: 'Opening worktree as project…', error: false });
       render();
-      try {
-        target = await requestJson('/api/projects', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ path: worktree.path, startCommand: project.startCommand }),
-        }, fetchImpl);
-        replaceProject(target);
-        projectMessages.set(project.id, { text: 'Worktree opened as project.', error: false });
-        projectsRefreshRequired = true;
-      } catch (error) {
-        projectMessages.set(project.id, { text: actionError('Open worktree', error), error: true });
-      } finally {
-        savingProject = false;
-      }
-      if (!target) {
-        render();
-        return;
-      }
+      return;
     }
     searchInput.value = '';
     collapsedProjects.delete(target.id);

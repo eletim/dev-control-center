@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  createWorktree, fetchRepository, GitActionManager, listBranches, listProjectWorktrees, previewWorktreeRemoval, removeAllWorktrees,
+  createWorktree, fetchRepository, GitActionManager, listBranches, listProjectWorktrees, openWorktree, previewWorktreeRemoval, removeAllWorktrees,
   removeWorktree, switchBranch, updateRepository,
 } from './git-actions.js';
 import { getGitMetadata } from './git-metadata.js';
@@ -61,6 +61,7 @@ export function createAppServer(
       const outputMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/output$/);
       const gitActionMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/git\/(branches|fetch|update|switch)$/);
       const bulkWorktreeMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/git\/worktrees\/removal$/);
+      const openWorktreeMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/git\/worktrees\/open$/);
       const worktreeMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/git\/worktrees$/);
 
       if (request.method === 'GET' && url.pathname === '/api/projects') {
@@ -130,6 +131,24 @@ export function createAppServer(
           ));
         });
         sendJson(response, 200, result);
+        return;
+      }
+
+      if (openWorktreeMatch && request.method === 'POST') {
+        const id = decodeURIComponent(openWorktreeMatch[1]);
+        const input = await readJson(request);
+        const { opened, created } = await processManager.withProjectLock(id, async () => {
+          const project = await store.get(id);
+          if (!project) throw new ProjectError('not_found', 'Project not found.');
+          return gitActionManager.withRepositoryLock(project.path, async () => {
+            const worktreePath = await openWorktree(project.path, input?.path);
+            const existing = (await store.list()).find((candidate) => candidate.path === worktreePath);
+            return existing
+              ? { opened: existing, created: false }
+              : { opened: await store.create({ path: worktreePath, startCommand: project.startCommand }), created: true };
+          });
+        });
+        sendJson(response, created ? 201 : 200, await present(opened, processManager));
         return;
       }
 
