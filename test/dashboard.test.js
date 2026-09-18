@@ -64,10 +64,14 @@ function createTestDocument() {
     ['project-count', new TestElement()],
     ['form-title', new TestElement('h2')],
   ]);
+  const listeners = new Map();
   return {
     elements,
+    hidden: false,
     createElement: (tagName) => new TestElement(tagName),
     querySelector: (selector) => elements.get(selector.slice(1)),
+    addEventListener: (type, listener) => { listeners.set(type, listener); },
+    dispatch: (type) => listeners.get(type)?.(),
   };
 }
 
@@ -121,6 +125,85 @@ async function waitFor(predicate, timeout = 2000) {
 function jsonResponse(body, status = 200) {
   return { ok: status >= 200 && status < 300, status, json: async () => body };
 }
+
+test('refreshes external Git and process changes on a timer and when the tab becomes visible', async () => {
+  const document = createTestDocument();
+  const project = {
+    id: 'one', name: 'demo', path: '/demo', startCommand: 'npm start', status: 'stopped',
+    git: { isRepository: true, branch: 'main', clean: true },
+  };
+  let current = project;
+  let listRequests = 0;
+  let tick;
+  const fetchImpl = async (url) => {
+    if (url === '/api/projects') {
+      listRequests += 1;
+      return jsonResponse([current]);
+    }
+    if (url.endsWith('/git/branches')) return jsonResponse({ branches: ['main', 'topic'] });
+    return jsonResponse({ worktrees: [{ path: '/demo', branch: current.git.branch }] });
+  };
+  const dashboard = initDashboard(document, fetchImpl, () => true, {
+    setIntervalImpl: (callback, delay) => {
+      assert.equal(delay, 15_000);
+      tick = callback;
+    },
+  });
+  await dashboard.ready;
+  current = { ...project, status: 'running', git: { ...project.git, branch: 'topic', clean: false } };
+  await tick();
+  await waitFor(() => findElement(document.elements.get('projects'), 'Running')
+    && findElement(document.elements.get('projects'), 'topic'));
+  assert.equal(listRequests, 2);
+
+  document.hidden = true;
+  tick();
+  assert.equal(listRequests, 2);
+  document.hidden = false;
+  document.dispatch('visibilitychange');
+  await waitFor(() => listRequests === 3);
+});
+
+test('reports an already exited Start Command without claiming it is running', async () => {
+  const document = createTestDocument();
+  const project = {
+    id: 'one', name: 'demo', path: '/demo', startCommand: 'true', status: 'stopped',
+    git: { isRepository: false },
+  };
+  const fetchImpl = async (url) => jsonResponse(url === '/api/projects' ? [project] : project);
+  const dashboard = initDashboard(document, fetchImpl, () => true, { setIntervalImpl: () => {} });
+  await dashboard.ready;
+  await findElement(document.elements.get('projects'), 'Start').dispatch('click');
+  const card = document.elements.get('projects').children[0];
+  assert.ok(findElement(card, 'Stopped'));
+  assert.ok(findElement(card, 'Start Command exited; no DCC-managed process is running.'));
+});
+
+test('updates Start feedback when a command exits after the action response', async () => {
+  const document = createTestDocument();
+  const project = {
+    id: 'one', name: 'demo', path: '/demo', startCommand: 'npm start', status: 'stopped',
+    git: { isRepository: false },
+  };
+  let status = 'stopped';
+  let tick;
+  const fetchImpl = async (url, options = {}) => {
+    if (url === '/api/projects') return jsonResponse([{ ...project, status }]);
+    if (options.method === 'POST') status = 'running';
+    return jsonResponse({ ...project, status });
+  };
+  const dashboard = initDashboard(document, fetchImpl, () => true, {
+    setIntervalImpl: (callback) => { tick = callback; },
+  });
+  await dashboard.ready;
+  await findElement(document.elements.get('projects'), 'Start').dispatch('click');
+  assert.ok(findElement(document.elements.get('projects'), 'Start complete.'));
+  status = 'stopped';
+  tick();
+  await waitFor(() => findElement(document.elements.get('projects'),
+    'Start Command exited; no DCC-managed process is running.'));
+  assert.ok(findElement(document.elements.get('projects'), 'Stopped'));
+});
 
 test('describes available and unavailable Git state explicitly', () => {
   assert.deepEqual(describeGit(null), {

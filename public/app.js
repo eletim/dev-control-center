@@ -41,7 +41,8 @@ export function describeGit(git) {
   };
 }
 
-export function initDashboard(documentObject = document, fetchImpl = fetch, confirmImpl = confirm) {
+export function initDashboard(documentObject = document, fetchImpl = fetch, confirmImpl = confirm,
+  { setIntervalImpl = setInterval } = {}) {
   const projectsElement = documentObject.querySelector('#projects');
   const form = documentObject.querySelector('#project-form');
   const idInput = documentObject.querySelector('#project-id');
@@ -360,6 +361,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
     replaceProject(refreshed);
     render();
     if (includeBranches && refreshed.git?.isRepository) await loadGitDetails(refreshed);
+    return refreshed;
   }
 
   function projectsSharingRepository(project) {
@@ -389,16 +391,26 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
     for (const { id } of affectedProjects) pendingProjects.add(id);
     projectMessages.set(project.id, { text: `${label} in progress…`, error: false });
     render();
+    let actionSucceeded = false;
     try {
       const updated = await request();
       replaceProject(updated);
+      actionSucceeded = true;
       projectMessages.set(project.id, { text: `${label} complete.`, error: false });
     } catch (error) {
       projectMessages.set(project.id, { text: actionError(label, error), error: true });
     }
     try {
       if (includeBranches) await refreshRepositoryProjects(affectedProjects);
-      else await refreshProject(project, false);
+      else {
+        const refreshed = await refreshProject(project, false);
+        if (actionSucceeded && (label === 'Start' || label === 'Restart') && refreshed.status === 'stopped') {
+          projectMessages.set(project.id, {
+            text: 'Start Command exited; no DCC-managed process is running.',
+            error: false,
+          });
+        }
+      }
     } catch (error) {
       const existing = projectMessages.get(project.id);
       projectMessages.set(project.id, {
@@ -537,6 +549,16 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
     render();
     try {
       projects = await requestJson('/api/projects', {}, fetchImpl);
+      for (const project of projects) {
+        const feedback = projectMessages.get(project.id);
+        if (project.status === 'stopped'
+          && (feedback?.text === 'Start complete.' || feedback?.text === 'Restart complete.')) {
+          projectMessages.set(project.id, {
+            text: 'Start Command exited; no DCC-managed process is running.',
+            error: false,
+          });
+        }
+      }
       const projectIds = new Set(projects.map(({ id }) => id));
       for (const id of branchStates.keys()) if (!projectIds.has(id)) branchStates.delete(id);
       for (const id of worktreeStates.keys()) if (!projectIds.has(id)) worktreeStates.delete(id);
@@ -636,6 +658,13 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
   cancelButton.addEventListener('click', resetForm);
   searchInput.addEventListener('input', render);
   refreshButton.addEventListener('click', () => loadProjects());
+  documentObject.addEventListener?.('visibilitychange', () => {
+    if (!documentObject.hidden) loadProjects(false);
+  });
+  const refreshTimer = setIntervalImpl(() => {
+    if (!documentObject.hidden) loadProjects(false);
+  }, 15_000);
+  refreshTimer?.unref?.();
   const ready = loadProjects();
   return { ready };
 }
