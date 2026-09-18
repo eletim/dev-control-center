@@ -697,7 +697,7 @@ test('search filters projects by name or path and project collapse preserves the
 
 test('long worktree lists show the registered project path and expand on demand', async () => {
   const document = createTestDocument();
-  const project = { id: 'one', name: 'Alpha', path: '/code/linked',
+  const project = { id: 'one', name: 'Alpha', path: '/code/linked/packages/app',
     startCommand: 'npm start', status: 'stopped', git: { isRepository: true, branch: 'linked', clean: true } };
   const listedProjectPath = '/alias/linked';
   const worktrees = Array.from({ length: 8 }, (_, index) => ({
@@ -715,7 +715,7 @@ test('long worktree lists show the registered project path and expand on demand'
   const list = document.elements.get('projects');
   const registeredRow = findWorktreeRow(list, listedProjectPath);
   assert.ok(registeredRow);
-  assert.ok(findElement(list, 'Project path'));
+  assert.ok(findElement(list, 'Project worktree'));
   assert.equal(findElement(registeredRow, 'Remove Worktree'), null);
   assert.equal(findElements(list, 'Remove Worktree').length, 4);
   assert.equal(findWorktreeRow(list, '/code/topic-6'), null);

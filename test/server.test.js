@@ -266,6 +266,10 @@ test('lists and explicitly removes only unregistered worktrees under project ser
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ path: nestedProjectPath, startCommand: 'node app.js' }),
     }).then((response) => response.json());
+    const nestedWorktrees = (await fetch(`${baseUrl}/api/projects/${nestedProject.id}/git/worktrees`)
+      .then((response) => response.json())).worktrees;
+    assert.equal(nestedWorktrees.find(({ path: entryPath }) => entryPath === worktreePath).isProjectWorktree, true);
+    assert.equal(nestedWorktrees.find(({ path: entryPath }) => entryPath === projectPath).isProjectWorktree, false);
     const registeredRemoval = await fetch(`${baseUrl}/api/projects/${project.id}/git/worktrees`, {
       method: 'DELETE',
       headers: { 'content-type': 'application/json' },

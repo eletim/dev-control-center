@@ -195,7 +195,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
         worktreeMetadata.className = 'git-metadata worktree-metadata';
         addMetadataRow(worktreeMetadata, 'Path', worktree.path);
         addMetadataRow(worktreeMetadata, 'Branch', worktree.branch || 'Detached');
-        if (isProjectWorktree(worktree)) addMetadataRow(worktreeMetadata, 'Role', 'Project path');
+        if (isProjectWorktree(worktree)) addMetadataRow(worktreeMetadata, 'Role', 'Project worktree');
         row.append(worktreeMetadata);
         if (!isProjectWorktree(worktree)) {
           row.append(makeButton(

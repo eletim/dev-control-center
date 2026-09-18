@@ -135,7 +135,9 @@ export function createAppServer(
               return Promise.all(worktrees.map(async (worktree) => {
                 let isProjectWorktree = false;
                 try {
-                  isProjectWorktree = await realpath(worktree.path) === project.path;
+                  const relativePath = path.relative(await realpath(worktree.path), project.path);
+                  isProjectWorktree = relativePath === '' || (relativePath !== '..'
+                    && !relativePath.startsWith(`..${path.sep}`) && !path.isAbsolute(relativePath));
                 } catch {
                   // Missing worktrees remain visible but cannot match the registered path.
                 }
