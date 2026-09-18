@@ -225,7 +225,8 @@ export class ProjectProcessManager {
     await delay(Math.max(0, startupDeadline - Date.now()));
     const pane = this.#paneState(managed);
     if (pane?.dead && (pane.status !== 0 || pane.signal)) {
-      const reason = pane.signal ? `signal ${pane.signal}` : `exit code ${pane.status}`;
+      const reason = pane.signal ? `signal ${pane.signal}`
+        : pane.status === null ? 'an unavailable termination reason' : `exit code ${pane.status}`;
       throw new ProjectError('start_failed', `Start Command failed with ${reason}. Output remains in tmux window ${managed.windowName}.`);
     }
   }
@@ -265,7 +266,8 @@ export class ProjectProcessManager {
       await this.#tmux(['set-option', '-w', '-t', windowId, 'remain-on-exit', 'on']);
       await this.#tmux(['set-option', '-w', '-t', windowId, 'automatic-rename', 'off']);
       await this.#tmux(['set-option', '-w', '-t', windowId, 'allow-rename', 'off']);
-      const supervisor = [process.execPath, processSupervisorPath, project.startCommand].map(shellQuote).join(' ');
+      const supervisor = [process.execPath, processSupervisorPath, project.startCommand,
+        this.tmuxPath, this.tmuxSocketName ?? ''].map(shellQuote).join(' ');
       const command = `${shellQuote(this.tmuxPath)} set-option -p -t "$TMUX_PANE" @dcc_command_started ${shellQuote(token)} && exec ${supervisor}`;
       await this.#tmux(['respawn-pane', '-k', '-t', paneId, '-c', project.path, command]);
       return managed;
@@ -336,10 +338,10 @@ export class ProjectProcessManager {
   #paneState(managed, requireStarted = true) {
     const result = this.#tmuxQuery([
       'display-message', '-p', '-t', managed.paneId,
-      '#{session_name}\t#{session_id}\t#{window_name}\t#{window_id}\t#{pane_id}\t#{@dcc_owner_token}\t#{@dcc_command_started}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_dead_signal}\t#{pane_pid}',
+      '#{session_name}\t#{session_id}\t#{window_name}\t#{window_id}\t#{pane_id}\t#{@dcc_owner_token}\t#{@dcc_command_started}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_dead_signal}\t#{@dcc_command_signal}\t#{pane_pid}',
     ], { encoding: 'utf8' });
     if (!result) return null;
-    const [sessionName, sessionId, windowName, windowId, paneId, token, commandStarted, dead, status, signal, pid]
+    const [sessionName, sessionId, windowName, windowId, paneId, token, commandStarted, dead, status, paneSignal, commandSignal, pid]
       = result.stdout.trim().split('\t');
     if (sessionName !== managed.sessionName || sessionId !== managed.sessionId
       || windowName !== managed.windowName || windowId !== managed.windowId
@@ -349,7 +351,7 @@ export class ProjectProcessManager {
       started: commandStarted === managed.token,
       dead: dead === '1',
       status: status === '' ? null : Number(status),
-      signal: signal || null,
+      signal: commandSignal || paneSignal || null,
       pid: Number(pid),
     };
   }

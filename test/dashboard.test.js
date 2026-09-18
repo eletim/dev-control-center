@@ -144,6 +144,9 @@ test('shows exit reason and lets a stopped project display its tmux output', asy
   await findElement(projects, 'View output').dispatch('click');
   assert.ok(findElement(projects, 'failure on stderr'));
   assert.ok(findElement(projects, 'Refresh output'));
+  project.process = { state: 'exited', exitCode: null, signal: 'SIGTERM' };
+  await document.elements.get('refresh').dispatch('click');
+  assert.ok(findElement(projects, 'Exited abnormally (signal SIGTERM).'));
 });
 
 test('refreshes external Git and process changes on a timer and when the tab becomes visible', async () => {

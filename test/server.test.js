@@ -150,6 +150,16 @@ test('shows retained tmux output and distinguishes normal and abnormal exits', a
     exited = await fetch(projectUrl).then((response) => response.json());
     assert.deepEqual(exited.process, { state: 'exited', exitCode: 23, signal: null });
     assert.match((await fetch(`${projectUrl}/output`).then((response) => response.json())).output, /failure output/);
+
+    await fetch(projectUrl, {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: projectPath, startCommand: 'kill -TERM $$' }),
+    });
+    const signaled = await fetch(`${projectUrl}/start`, { method: 'POST' });
+    assert.equal(signaled.status, 400);
+    assert.match((await signaled.json()).message, /signal SIGTERM/);
+    exited = await fetch(projectUrl).then((response) => response.json());
+    assert.deepEqual(exited.process, { state: 'exited', exitCode: null, signal: 'SIGTERM' });
     assert.equal((await fetch(`${baseUrl}/api/projects/missing/output`)).status, 404);
   });
 });
