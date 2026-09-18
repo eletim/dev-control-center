@@ -41,7 +41,8 @@ export function describeGit(git) {
   };
 }
 
-export function initDashboard(documentObject = document, fetchImpl = fetch, confirmImpl = confirm) {
+export function initDashboard(documentObject = document, fetchImpl = fetch, confirmImpl = confirm,
+  { setIntervalImpl = setInterval } = {}) {
   const projectsElement = documentObject.querySelector('#projects');
   const form = documentObject.querySelector('#project-form');
   const idInput = documentObject.querySelector('#project-id');
@@ -59,9 +60,11 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
   let savingProject = false;
   let savingProjectId = null;
   let projectsRefreshRequired = false;
+  let visibilityRefreshRequired = false;
   const pendingProjects = new Set();
   const projectMessages = new Map();
   const branchStates = new Map();
+  const selectedBranches = new Map();
   const worktreeStates = new Map();
   const collapsedProjects = new Set();
   const expandedWorktrees = new Set();
@@ -149,6 +152,9 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
       option.selected = branch === project.git.branch;
       select.append(option);
     }
+    const selectedBranch = selectedBranches.get(project.id);
+    select.value = selectedBranch && branches.includes(selectedBranch)
+      ? selectedBranch : branches.includes(project.git.branch) ? project.git.branch : '';
     select.disabled = busy || !branchesReady || branches.length === 0;
     branchLabel.append(select);
     const switchButton = makeButton('Switch', 'secondary', true, () => {
@@ -157,7 +163,10 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
     const updateSwitchState = () => {
       switchButton.disabled = busy || !select.value || select.value === project.git.branch;
     };
-    select.addEventListener('change', updateSwitchState);
+    select.addEventListener('change', () => {
+      selectedBranches.set(project.id, select.value);
+      updateSwitchState();
+    });
     updateSwitchState();
     branchControls.append(branchLabel, switchButton);
     section.append(branchControls);
@@ -324,6 +333,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
         {},
         fetchImpl,
       );
+      if (!body.branches.includes(selectedBranches.get(project.id))) selectedBranches.delete(project.id);
       branchStates.set(project.id, { status: 'ready', branches: body.branches });
     } catch (error) {
       branchStates.set(project.id, { status: 'error', message: error.message });
@@ -360,6 +370,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
     replaceProject(refreshed);
     render();
     if (includeBranches && refreshed.git?.isRepository) await loadGitDetails(refreshed);
+    return refreshed;
   }
 
   function projectsSharingRepository(project) {
@@ -389,16 +400,26 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
     for (const { id } of affectedProjects) pendingProjects.add(id);
     projectMessages.set(project.id, { text: `${label} in progress…`, error: false });
     render();
+    let actionSucceeded = false;
     try {
       const updated = await request();
       replaceProject(updated);
+      actionSucceeded = true;
       projectMessages.set(project.id, { text: `${label} complete.`, error: false });
     } catch (error) {
       projectMessages.set(project.id, { text: actionError(label, error), error: true });
     }
     try {
       if (includeBranches) await refreshRepositoryProjects(affectedProjects);
-      else await refreshProject(project, false);
+      else {
+        const refreshed = await refreshProject(project, false);
+        if (actionSucceeded && (label === 'Start' || label === 'Restart') && refreshed.status === 'stopped') {
+          projectMessages.set(project.id, {
+            text: 'Start Command exited; no DCC-managed process is running.',
+            error: false,
+          });
+        }
+      }
     } catch (error) {
       const existing = projectMessages.get(project.id);
       projectMessages.set(project.id, {
@@ -537,8 +558,19 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
     render();
     try {
       projects = await requestJson('/api/projects', {}, fetchImpl);
+      for (const project of projects) {
+        const feedback = projectMessages.get(project.id);
+        if (project.status === 'stopped'
+          && (feedback?.text === 'Start complete.' || feedback?.text === 'Restart complete.')) {
+          projectMessages.set(project.id, {
+            text: 'Start Command exited; no DCC-managed process is running.',
+            error: false,
+          });
+        }
+      }
       const projectIds = new Set(projects.map(({ id }) => id));
       for (const id of branchStates.keys()) if (!projectIds.has(id)) branchStates.delete(id);
+      for (const id of selectedBranches.keys()) if (!projectIds.has(id)) selectedBranches.delete(id);
       for (const id of worktreeStates.keys()) if (!projectIds.has(id)) worktreeStates.delete(id);
       for (const id of projectMessages.keys()) if (!projectIds.has(id)) projectMessages.delete(id);
       for (const id of collapsedProjects) if (!projectIds.has(id)) collapsedProjects.delete(id);
@@ -553,13 +585,27 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
     } finally {
       loadingProjects = false;
       render();
+      await reconcileProjectsWhenIdle();
     }
   }
 
   async function reconcileProjectsWhenIdle() {
-    if (!projectsRefreshRequired || loadingProjects || savingProject || pendingProjects.size > 0) return;
+    if ((!projectsRefreshRequired && !visibilityRefreshRequired)
+      || loadingProjects || savingProject || pendingProjects.size > 0) return;
+    if (documentObject.hidden && !projectsRefreshRequired) return;
     projectsRefreshRequired = false;
+    visibilityRefreshRequired = false;
     await loadProjects(false);
+  }
+
+  function refreshWhenVisible() {
+    if (documentObject.hidden) return;
+    if (loadingProjects || savingProject || pendingProjects.size > 0) {
+      visibilityRefreshRequired = true;
+      return;
+    }
+    visibilityRefreshRequired = false;
+    loadProjects(false);
   }
 
   function editProject(project) {
@@ -593,6 +639,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
       if (idInput.value === project.id) resetForm();
       projects = projects.filter(({ id }) => id !== project.id);
       branchStates.delete(project.id);
+      selectedBranches.delete(project.id);
       worktreeStates.delete(project.id);
       projectMessages.delete(project.id);
       projectsRefreshRequired = true;
@@ -636,6 +683,13 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
   cancelButton.addEventListener('click', resetForm);
   searchInput.addEventListener('input', render);
   refreshButton.addEventListener('click', () => loadProjects());
+  documentObject.addEventListener?.('visibilitychange', () => {
+    refreshWhenVisible();
+  });
+  const refreshTimer = setIntervalImpl(() => {
+    if (!documentObject.hidden) loadProjects(false);
+  }, 15_000);
+  refreshTimer?.unref?.();
   const ready = loadProjects();
   return { ready };
 }
