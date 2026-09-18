@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  fetchRepository, GitActionManager, listBranches, listProjectWorktrees, previewWorktreeRemoval, removeAllWorktrees,
+  createWorktree, fetchRepository, GitActionManager, listBranches, listProjectWorktrees, previewWorktreeRemoval, removeAllWorktrees,
   removeWorktree, switchBranch, updateRepository,
 } from './git-actions.js';
 import { getGitMetadata } from './git-metadata.js';
@@ -133,14 +133,15 @@ export function createAppServer(
         return;
       }
 
-      if (worktreeMatch && (request.method === 'GET' || request.method === 'DELETE')) {
+      if (worktreeMatch && ['GET', 'POST', 'DELETE'].includes(request.method)) {
         const id = decodeURIComponent(worktreeMatch[1]);
-        const input = request.method === 'DELETE' ? await readJson(request) : null;
+        const input = request.method !== 'GET' ? await readJson(request) : null;
         const result = await processManager.withProjectLock(id, async () => {
           const project = await store.get(id);
           if (!project) throw new ProjectError('not_found', 'Project not found.');
           return gitActionManager.withRepositoryLock(project.path, async () => {
             if (request.method === 'GET') return listProjectWorktrees(project.path);
+            if (request.method === 'POST') return createWorktree(project.path, input);
             await store.withProjectSnapshot(async (projects) => {
               await removeWorktree(project.path, input?.path, projects.map((candidate) => candidate.path));
             });
@@ -148,6 +149,7 @@ export function createAppServer(
           });
         });
         if (request.method === 'GET') sendJson(response, 200, { worktrees: result });
+        else if (request.method === 'POST') sendJson(response, 201, { path: result });
         else {
           response.writeHead(204);
           response.end();
@@ -204,6 +206,7 @@ export function createAppServer(
           'duplicate_path', 'already_running', 'not_running', 'project_running',
           'dirty_worktree', 'git_state_changed', 'non_fast_forward', 'branch_in_use',
           'registered_worktree', 'main_worktree', 'worktree_remove_failed',
+          'worktree_path_exists', 'worktree_create_failed',
         ];
         const status = error.code === 'not_found' ? 404
           : error.code === 'shutting_down' ? 503

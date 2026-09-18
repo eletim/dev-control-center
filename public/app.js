@@ -66,6 +66,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
   const branchStates = new Map();
   const selectedBranches = new Map();
   const worktreeStates = new Map();
+  const worktreeDrafts = new Map();
   const outputStates = new Map();
   const collapsedProjects = new Set();
   const expandedWorktrees = new Set();
@@ -188,6 +189,63 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
     const worktreeHeading = documentObject.createElement('h5');
     worktreeHeading.textContent = 'Worktrees';
     section.append(worktreeHeading);
+    const draft = worktreeDrafts.get(project.id) || { path: '', branch: '', mode: 'new' };
+    const createForm = documentObject.createElement('form');
+    createForm.className = 'worktree-create';
+    const pathLabel = documentObject.createElement('label');
+    pathLabel.textContent = 'New worktree path';
+    const worktreePath = documentObject.createElement('input');
+    worktreePath.placeholder = '/home/me/code/project-topic';
+    worktreePath.value = draft.path;
+    worktreePath.required = true;
+    worktreePath.addEventListener('input', () => { draft.path = worktreePath.value; worktreeDrafts.set(project.id, draft); });
+    pathLabel.append(worktreePath);
+    const modeLabel = documentObject.createElement('label');
+    modeLabel.textContent = 'Branch source';
+    const mode = documentObject.createElement('select');
+    for (const [value, label] of [['new', 'Create new branch from HEAD'], ['existing', 'Existing local branch']]) {
+      const option = documentObject.createElement('option');
+      option.value = value;
+      option.textContent = label;
+      mode.append(option);
+    }
+    mode.value = draft.mode;
+    mode.addEventListener('change', () => {
+      draft.mode = mode.value;
+      draft.branch = '';
+      worktreeDrafts.set(project.id, draft);
+      render();
+    });
+    modeLabel.append(mode);
+    const worktreeBranchLabel = documentObject.createElement('label');
+    worktreeBranchLabel.textContent = 'Branch';
+    let branchControl;
+    if (draft.mode === 'existing') {
+      branchControl = documentObject.createElement('select');
+      const placeholder = documentObject.createElement('option');
+      placeholder.value = '';
+      placeholder.textContent = 'Select a branch';
+      branchControl.append(placeholder);
+      for (const branch of branchStates.get(project.id)?.branches || []) {
+        const option = documentObject.createElement('option');
+        option.value = branch;
+        option.textContent = branch;
+        branchControl.append(option);
+      }
+      branchControl.value = draft.branch;
+    } else {
+      branchControl = documentObject.createElement('input');
+      branchControl.placeholder = 'topic';
+      branchControl.value = draft.branch;
+    }
+    branchControl.required = true;
+    branchControl.addEventListener('input', () => { draft.branch = branchControl.value; worktreeDrafts.set(project.id, draft); });
+    branchControl.addEventListener('change', () => { draft.branch = branchControl.value; worktreeDrafts.set(project.id, draft); });
+    worktreeBranchLabel.append(branchControl);
+    createForm.append(pathLabel, modeLabel, worktreeBranchLabel,
+      makeButton('Create worktree', '', busy, () => createProjectWorktree(project, draft)));
+    createForm.addEventListener('submit', (event) => { event.preventDefault(); createProjectWorktree(project, draft); });
+    section.append(createForm);
     if (worktreeState?.status === 'ready') {
       section.append(makeButton('Remove all worktrees', 'secondary compact', busy,
         () => removeAllProjectWorktrees(project)));
@@ -205,15 +263,26 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
         worktreeMetadata.className = 'git-metadata worktree-metadata';
         addMetadataRow(worktreeMetadata, 'Path', worktree.path);
         addMetadataRow(worktreeMetadata, 'Branch', worktree.branch || 'Detached');
+        addMetadataRow(worktreeMetadata, 'Working tree', worktree.clean === null || worktree.clean === undefined
+          ? 'Unavailable' : worktree.clean ? 'Clean' : 'Uncommitted changes');
         if (isProjectWorktree(worktree)) addMetadataRow(worktreeMetadata, 'Role', 'Project worktree');
         row.append(worktreeMetadata);
         if (!isProjectWorktree(worktree)) {
-          row.append(makeButton(
-            'Remove Worktree',
-            'secondary compact',
-            busy,
-            () => removeProjectWorktree(project, worktree),
-          ));
+          const rowActions = documentObject.createElement('div');
+          rowActions.className = 'actions';
+          if (worktree.clean !== null) {
+            rowActions.append(makeButton('Open as project', 'secondary compact', busy,
+              () => openProjectWorktree(project, worktree)));
+          }
+          rowActions.append(
+            makeButton(
+              'Remove Worktree',
+              'secondary compact',
+              busy,
+              () => removeProjectWorktree(project, worktree),
+            ),
+          );
+          row.append(rowActions);
         }
         worktreeList.append(row);
       }
@@ -517,6 +586,73 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
     );
   }
 
+  async function createProjectWorktree(project, draft) {
+    const affectedProjects = projectsSharingRepository(project);
+    if (projectsAreBusy(affectedProjects)) return;
+    activeProjectId = project.id;
+    for (const { id } of affectedProjects) pendingProjects.add(id);
+    projectMessages.set(project.id, { text: 'Create worktree in progress…', error: false });
+    render();
+    try {
+      await requestJson(`/api/projects/${encodeURIComponent(project.id)}/git/worktrees`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: draft.path, branch: draft.branch, createBranch: draft.mode === 'new' }),
+      }, fetchImpl);
+      worktreeDrafts.delete(project.id);
+      projectMessages.set(project.id, { text: 'Worktree created.', error: false });
+    } catch (error) {
+      projectMessages.set(project.id, { text: actionError('Create worktree', error), error: true });
+    }
+    try {
+      await refreshRepositoryProjects(affectedProjects);
+    } catch (error) {
+      const existing = projectMessages.get(project.id);
+      projectMessages.set(project.id, {
+        text: `${existing?.text || 'Create worktree finished.'} State refresh failed: ${error.message}`,
+        error: true,
+      });
+    } finally {
+      for (const { id } of affectedProjects) pendingProjects.delete(id);
+      render();
+      await reconcileProjectsWhenIdle();
+    }
+  }
+
+  async function openProjectWorktree(project, worktree) {
+    if (projectsAreBusy([project]) || savingProject) return;
+    let target = projects.find((candidate) => candidate.path === worktree.path);
+    if (!target) {
+      savingProject = true;
+      projectMessages.set(project.id, { text: 'Opening worktree as project…', error: false });
+      render();
+      try {
+        target = await requestJson('/api/projects', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ path: worktree.path, startCommand: project.startCommand }),
+        }, fetchImpl);
+        replaceProject(target);
+        projectMessages.set(project.id, { text: 'Worktree opened as project.', error: false });
+        projectsRefreshRequired = true;
+      } catch (error) {
+        projectMessages.set(project.id, { text: actionError('Open worktree', error), error: true });
+      } finally {
+        savingProject = false;
+      }
+      if (!target) {
+        render();
+        return;
+      }
+    }
+    searchInput.value = '';
+    collapsedProjects.delete(target.id);
+    activeProjectId = target.id;
+    render();
+    projectsElement.querySelector?.('.active-project')?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+    await reconcileProjectsWhenIdle();
+  }
+
   async function removeProjectWorktree(project, worktree) {
     const affectedProjects = projectsSharingRepository(project);
     if (projectsAreBusy(affectedProjects)
@@ -627,6 +763,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
       for (const id of branchStates.keys()) if (!projectIds.has(id)) branchStates.delete(id);
       for (const id of selectedBranches.keys()) if (!projectIds.has(id)) selectedBranches.delete(id);
       for (const id of worktreeStates.keys()) if (!projectIds.has(id)) worktreeStates.delete(id);
+      for (const id of worktreeDrafts.keys()) if (!projectIds.has(id)) worktreeDrafts.delete(id);
       for (const id of outputStates.keys()) if (!projectIds.has(id)) outputStates.delete(id);
       for (const id of projectMessages.keys()) if (!projectIds.has(id)) projectMessages.delete(id);
       for (const id of collapsedProjects) if (!projectIds.has(id)) collapsedProjects.delete(id);

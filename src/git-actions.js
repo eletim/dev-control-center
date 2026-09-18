@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { readdir, readFile, realpath } from 'node:fs/promises';
+import { lstat, readdir, readFile, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { ProjectError } from './project-store.js';
@@ -255,8 +255,51 @@ export async function listProjectWorktrees(projectPath) {
     } catch {
       // Missing worktrees remain visible but cannot contain the project.
     }
-    return { ...worktree, isProjectWorktree };
+    let clean = null;
+    try {
+      clean = (await git(worktree.path, ['status', '--porcelain'])) === '';
+    } catch {
+      // Missing worktrees and bare main repositories have no working tree status.
+    }
+    return { ...worktree, isProjectWorktree, clean };
   }));
+}
+
+export async function createWorktree(repositoryPath, input) {
+  await requireRepository(repositoryPath);
+  const { path: worktreePath, branch, createBranch } = input ?? {};
+  if (typeof worktreePath !== 'string' || !path.isAbsolute(worktreePath)) {
+    throw new ProjectError('invalid_worktree', 'An absolute worktree path is required.');
+  }
+  const destination = path.resolve(worktreePath);
+  if (typeof branch !== 'string' || branch.trim() !== branch || !branch || branch === '-'
+    || !await isSuccessfulGit(repositoryPath, ['check-ref-format', '--branch', branch])) {
+    throw new ProjectError('invalid_branch', 'A valid local branch name is required.');
+  }
+  if (typeof createBranch !== 'boolean') {
+    throw new ProjectError('invalid_input', 'Choose whether to create a new branch.');
+  }
+  const exists = await isSuccessfulGit(repositoryPath, [
+    'show-ref', '--verify', '--quiet', `refs/heads/${branch}`,
+  ]);
+  if (exists === createBranch) {
+    throw new ProjectError('invalid_branch', createBranch
+      ? 'That local branch already exists.' : 'That local branch does not exist.');
+  }
+  try {
+    await lstat(destination);
+    throw new ProjectError('worktree_path_exists', 'Worktree path already exists.');
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  try {
+    await git(repositoryPath, createBranch
+      ? ['worktree', 'add', '-b', branch, destination]
+      : ['worktree', 'add', destination, branch]);
+  } catch {
+    throw new ProjectError('worktree_create_failed', 'Could not create the Git worktree.');
+  }
+  return destination;
 }
 
 async function removableWorktree(repositoryPath, worktreePath, protectedPaths) {
