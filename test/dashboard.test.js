@@ -60,6 +60,8 @@ function createTestDocument() {
     ['cancel', new TestElement('button')],
     ['save-project', new TestElement('button')],
     ['refresh', new TestElement('button')],
+    ['project-search', new TestElement('input')],
+    ['project-count', new TestElement()],
     ['form-title', new TestElement('h2')],
   ]);
   return {
@@ -94,7 +96,7 @@ function findTag(root, tagName) {
 }
 
 function findWorktreeRow(root, worktreePath) {
-  if (root.className === 'worktree-row' && findElement(root, worktreePath)) return root;
+  if (root.className.split(' ').includes('worktree-row') && findElement(root, worktreePath)) return root;
   for (const child of root.children) {
     const match = findWorktreeRow(child, worktreePath);
     if (match) return match;
@@ -650,4 +652,64 @@ test('bulk worktree removal confirms the preview count and reports removed and r
   assert.deepEqual(JSON.parse(removal.body), { paths: ['/topic'] });
   assert.ok(findElement(projects, 'Removed 1 worktrees: /topic. Retained 1 worktrees: /demo: Registered project.'));
   assert.equal(requests.filter(({ url }) => url.endsWith('/git/worktrees')).length, 2);
+});
+
+test('search filters projects by name or path and project collapse preserves the visible target', async () => {
+  const document = createTestDocument();
+  const projects = [
+    { id: 'one', name: 'Alpha', path: '/code/alpha', startCommand: 'npm start', status: 'stopped' },
+    { id: 'two', name: 'Beta', path: '/work/special', startCommand: 'npm start', status: 'stopped' },
+  ];
+  const fetchImpl = async (url) => jsonResponse(url === '/api/projects' ? projects : projects[0]);
+  await initDashboard(document, fetchImpl, () => true).ready;
+  const list = document.elements.get('projects');
+  const search = document.elements.get('project-search');
+  search.value = 'SPECIAL';
+  await search.dispatch('input');
+  assert.equal(list.children.length, 1);
+  assert.ok(findElement(list, 'Beta'));
+  assert.equal(document.elements.get('project-count').textContent, '1 of 2 projects shown');
+
+  await findElement(list, 'Edit').dispatch('click');
+  assert.ok(findElement(list, 'Current target'));
+  await findElement(list, 'Collapse project').dispatch('click');
+  assert.ok(findElement(list, 'Beta'));
+  assert.ok(findElement(list, '/work/special'));
+  assert.ok(findElement(list, 'Current target'));
+  assert.equal(findElement(list, 'Edit'), null);
+  await findElement(list, 'Expand project').dispatch('click');
+  assert.ok(findElement(list, 'Edit'));
+
+  search.value = 'missing';
+  await search.dispatch('input');
+  assert.ok(findElement(list, '<p class="empty">No projects match your search.</p>'));
+  search.value = 'alpha';
+  await search.dispatch('input');
+  assert.ok(findElement(list, 'Alpha'));
+});
+
+test('long worktree lists show the registered project path and expand on demand', async () => {
+  const document = createTestDocument();
+  const project = { id: 'one', name: 'Alpha', path: '/code/linked',
+    startCommand: 'npm start', status: 'stopped', git: { isRepository: true, branch: 'linked', clean: true } };
+  const worktrees = Array.from({ length: 8 }, (_, index) => ({
+    path: index === 7 ? project.path : `/code/topic-${index}`,
+    branch: index === 7 ? 'linked' : `topic-${index}`,
+  }));
+  const fetchImpl = async (url) => {
+    if (url === '/api/projects') return jsonResponse([project]);
+    if (url.endsWith('/git/branches')) return jsonResponse({ branches: ['linked'] });
+    if (url.endsWith('/git/worktrees')) return jsonResponse({ worktrees });
+    return jsonResponse(project);
+  };
+  await initDashboard(document, fetchImpl, () => true).ready;
+  const list = document.elements.get('projects');
+  assert.ok(findWorktreeRow(list, project.path));
+  assert.ok(findElement(list, 'Project path'));
+  assert.equal(findElements(list, 'Remove Worktree').length, 4);
+  assert.equal(findWorktreeRow(list, '/code/topic-6'), null);
+  await findElement(list, 'Show all 8 worktrees').dispatch('click');
+  assert.equal(findElements(list, 'Remove Worktree').length, 7);
+  await findElement(list, 'Show fewer worktrees').dispatch('click');
+  assert.equal(findElements(list, 'Remove Worktree').length, 4);
 });
