@@ -290,6 +290,10 @@ export async function openWorktree(repositoryPath, requestedPath) {
   return worktree.canonicalPath;
 }
 
+async function checkedOutBranch(repositoryPath, branch) {
+  return (await listWorktrees(repositoryPath)).find((worktree) => worktree.branch === branch);
+}
+
 export async function createWorktree(repositoryPath, input) {
   await requireRepository(repositoryPath);
   const { path: worktreePath, branch, createBranch } = input ?? {};
@@ -317,12 +321,28 @@ export async function createWorktree(repositoryPath, input) {
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
   }
+  if (!createBranch) {
+    const checkedOut = await checkedOutBranch(repositoryPath, branch);
+    if (checkedOut) {
+      throw new ProjectError('branch_in_use', `Branch is already checked out at ${checkedOut.path}. Choose another branch.`);
+    }
+  }
   try {
     await git(repositoryPath, createBranch
       ? ['worktree', 'add', '-b', branch, destination]
       : ['worktree', 'add', destination, branch]);
   } catch {
-    throw new ProjectError('worktree_create_failed', 'Could not create the Git worktree.');
+    if (!createBranch) {
+      try {
+        const checkedOut = await checkedOutBranch(repositoryPath, branch);
+        if (checkedOut) {
+          throw new ProjectError('branch_in_use', `Branch is already checked out at ${checkedOut.path}. Choose another branch.`);
+        }
+      } catch (error) {
+        if (error instanceof ProjectError) throw error;
+      }
+    }
+    throw new ProjectError('worktree_create_failed', 'Could not create the Git worktree. Check the target path and branch, then try again.');
   }
   return destination;
 }

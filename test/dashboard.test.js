@@ -277,6 +277,30 @@ test('keeps a selected branch available for Switch across automatic refreshes', 
   assert.equal(switchedBranch, 'topic');
 });
 
+test('periodic refresh returns focus to project action buttons', async () => {
+  const document = createTestDocument();
+  const project = { id: 'one', name: 'demo', path: '/demo', startCommand: 'true', status: 'stopped',
+    git: { isRepository: false } };
+  let tick;
+  let requests = 0;
+  const fetchImpl = async (url) => {
+    if (url === '/api/projects') requests += 1;
+    return jsonResponse(url === '/api/projects' ? [project] : project);
+  };
+  await initDashboard(document, fetchImpl, () => true, {
+    setIntervalImpl: (callback) => { tick = callback; },
+  }).ready;
+  for (const label of ['Start', 'Edit', 'Delete']) {
+    const previous = findElement(document.elements.get('projects'), label);
+    previous.focus();
+    tick();
+    await waitFor(() => requests >= 2 && !document.elements.get('refresh').disabled
+      && document.activeElement !== previous);
+    assert.equal(document.activeElement, findElement(document.elements.get('projects'), label));
+    requests = 1;
+  }
+});
+
 test('runs a visibility refresh after an active project operation settles', async () => {
   const document = createTestDocument();
   const project = {

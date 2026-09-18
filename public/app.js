@@ -71,6 +71,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
   const collapsedProjects = new Set();
   const expandedWorktrees = new Set();
   let activeProjectId = null;
+  let pendingFocusKey = null;
   const worktreePreviewLimit = 5;
 
   function actionError(label, error) {
@@ -97,12 +98,13 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
     list.append(term, detail);
   }
 
-  function makeButton(label, className, disabled, listener) {
+  function makeButton(label, className, disabled, listener, focusKey) {
     const button = documentObject.createElement('button');
     button.type = 'button';
     button.className = className;
     button.textContent = label;
     button.disabled = disabled;
+    if (focusKey) button.focusKey = focusKey;
     button.addEventListener('click', listener);
     return button;
   }
@@ -379,7 +381,9 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
 
   function render() {
     const focused = documentObject.activeElement;
-    const focusKey = focused?.focusKey;
+    if (focused?.focusKey) pendingFocusKey = focused.focusKey;
+    else if (focused && focused !== documentObject.body) pendingFocusKey = null;
+    const focusKey = pendingFocusKey;
     const selection = focused?.tagName === 'INPUT' && typeof focused.selectionStart === 'number'
       ? [focused.selectionStart, focused.selectionEnd] : null;
     refreshButton.disabled = loadingProjects || savingProject || pendingProjects.size > 0;
@@ -392,10 +396,12 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
     projectCount.textContent = `${visibleProjects.length} of ${projects.length} projects shown`;
     if (!projects.length) {
       projectsElement.innerHTML = '<p class="empty">No projects registered yet.</p>';
+      pendingFocusKey = null;
       return;
     }
     if (!visibleProjects.length) {
       projectsElement.innerHTML = '<p class="empty">No projects match your search.</p>';
+      pendingFocusKey = null;
       return;
     }
     projectsElement.replaceChildren(...visibleProjects.map((project) => {
@@ -432,11 +438,11 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
       const actions = documentObject.createElement('div');
       actions.className = 'actions';
       actions.append(
-        makeButton('Start', '', busy || project.status === 'running', () => runLifecycleAction(project, 'start')),
-        makeButton('Stop', 'secondary', busy || project.status !== 'running', () => runLifecycleAction(project, 'stop')),
-        makeButton('Restart', 'secondary', busy || project.status !== 'running', () => runLifecycleAction(project, 'restart')),
-        makeButton('Edit', 'secondary', busy || project.status === 'running', () => editProject(project)),
-        makeButton('Delete', 'secondary', busy || project.status === 'running', () => deleteProject(project)),
+        makeButton('Start', '', busy || project.status === 'running', () => runLifecycleAction(project, 'start'), `${project.id}:start`),
+        makeButton('Stop', 'secondary', busy || project.status !== 'running', () => runLifecycleAction(project, 'stop'), `${project.id}:stop`),
+        makeButton('Restart', 'secondary', busy || project.status !== 'running', () => runLifecycleAction(project, 'restart'), `${project.id}:restart`),
+        makeButton('Edit', 'secondary', busy || project.status === 'running', () => editProject(project), `${project.id}:edit`),
+        makeButton('Delete', 'secondary', busy || project.status === 'running', () => deleteProject(project), `${project.id}:delete`),
       );
       article.append(header, status, pathLine);
       if (activeProjectId === project.id) {
@@ -466,8 +472,12 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
         return null;
       };
       const replacement = findFocused(projectsElement);
-      replacement?.focus();
-      if (selection && replacement?.setSelectionRange) replacement.setSelectionRange(...selection);
+      if (!replacement) pendingFocusKey = null;
+      else if (!replacement.disabled) {
+        replacement.focus();
+        if (selection && replacement.setSelectionRange) replacement.setSelectionRange(...selection);
+        pendingFocusKey = null;
+      } else if (!loadingProjects) pendingFocusKey = null;
     }
   }
 

@@ -367,6 +367,12 @@ test('creates worktrees on new or existing branches and reports their dirty stat
     assert.equal((await execFileAsync('git', ['-C', newPath, 'branch', '--show-current'])).stdout.trim(), 'topic');
     const existingPath = `${projectPath}-existing`;
     assert.equal((await create({ path: existingPath, branch: 'spare', createBranch: false })).status, 201);
+    const inUse = await create({ path: `${projectPath}-another`, branch: 'spare', createBranch: false });
+    assert.equal(inUse.status, 409);
+    assert.deepEqual(await inUse.json(), {
+      error: 'branch_in_use',
+      message: `Branch is already checked out at ${existingPath}. Choose another branch.`,
+    });
     const refused = await create({ path: `${projectPath}-bad`, branch: '--detach', createBranch: true });
     assert.equal(refused.status, 400);
     assert.equal((await refused.json()).error, 'invalid_branch');
