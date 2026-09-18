@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, realpath } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -130,7 +130,18 @@ export function createAppServer(
           const project = await store.get(id);
           if (!project) throw new ProjectError('not_found', 'Project not found.');
           return gitActionManager.withRepositoryLock(project.path, async () => {
-            if (request.method === 'GET') return listWorktrees(project.path);
+            if (request.method === 'GET') {
+              const worktrees = await listWorktrees(project.path);
+              return Promise.all(worktrees.map(async (worktree) => {
+                let isProjectWorktree = false;
+                try {
+                  isProjectWorktree = await realpath(worktree.path) === project.path;
+                } catch {
+                  // Missing worktrees remain visible but cannot match the registered path.
+                }
+                return { ...worktree, isProjectWorktree };
+              }));
+            }
             await store.withProjectSnapshot(async (projects) => {
               await removeWorktree(project.path, input?.path, projects.map((candidate) => candidate.path));
             });

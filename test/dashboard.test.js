@@ -672,6 +672,13 @@ test('search filters projects by name or path and project collapse preserves the
 
   await findElement(list, 'Edit').dispatch('click');
   assert.ok(findElement(list, 'Current target'));
+  assert.equal(document.elements.get('form-title').textContent, 'Edit project: Beta');
+  search.value = 'alpha';
+  await search.dispatch('input');
+  assert.equal(findElement(list, 'Beta'), null);
+  assert.equal(document.elements.get('form-title').textContent, 'Edit project: Beta');
+  search.value = 'special';
+  await search.dispatch('input');
   await findElement(list, 'Collapse project').dispatch('click');
   assert.ok(findElement(list, 'Beta'));
   assert.ok(findElement(list, '/work/special'));
@@ -692,9 +699,11 @@ test('long worktree lists show the registered project path and expand on demand'
   const document = createTestDocument();
   const project = { id: 'one', name: 'Alpha', path: '/code/linked',
     startCommand: 'npm start', status: 'stopped', git: { isRepository: true, branch: 'linked', clean: true } };
+  const listedProjectPath = '/alias/linked';
   const worktrees = Array.from({ length: 8 }, (_, index) => ({
-    path: index === 7 ? project.path : `/code/topic-${index}`,
+    path: index === 7 ? listedProjectPath : `/code/topic-${index}`,
     branch: index === 7 ? 'linked' : `topic-${index}`,
+    isProjectWorktree: index === 7,
   }));
   const fetchImpl = async (url) => {
     if (url === '/api/projects') return jsonResponse([project]);
@@ -704,8 +713,10 @@ test('long worktree lists show the registered project path and expand on demand'
   };
   await initDashboard(document, fetchImpl, () => true).ready;
   const list = document.elements.get('projects');
-  assert.ok(findWorktreeRow(list, project.path));
+  const registeredRow = findWorktreeRow(list, listedProjectPath);
+  assert.ok(registeredRow);
   assert.ok(findElement(list, 'Project path'));
+  assert.equal(findElement(registeredRow, 'Remove Worktree'), null);
   assert.equal(findElements(list, 'Remove Worktree').length, 4);
   assert.equal(findWorktreeRow(list, '/code/topic-6'), null);
   await findElement(list, 'Show all 8 worktrees').dispatch('click');

@@ -183,20 +183,21 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
         () => removeAllProjectWorktrees(project)));
       const worktreeList = documentObject.createElement('div');
       worktreeList.className = 'worktree-list';
+      const isProjectWorktree = (worktree) => worktree.isProjectWorktree || worktree.path === project.path;
       const worktrees = [...worktreeState.worktrees].sort((a, b) =>
-        Number(b.path === project.path) - Number(a.path === project.path));
+        Number(isProjectWorktree(b)) - Number(isProjectWorktree(a)));
       const showAll = expandedWorktrees.has(project.id);
       const visibleWorktrees = showAll ? worktrees : worktrees.slice(0, worktreePreviewLimit);
       for (const worktree of visibleWorktrees) {
         const row = documentObject.createElement('div');
-        row.className = `worktree-row${worktree.path === project.path ? ' current-worktree' : ''}`;
+        row.className = `worktree-row${isProjectWorktree(worktree) ? ' current-worktree' : ''}`;
         const worktreeMetadata = documentObject.createElement('dl');
         worktreeMetadata.className = 'git-metadata worktree-metadata';
         addMetadataRow(worktreeMetadata, 'Path', worktree.path);
         addMetadataRow(worktreeMetadata, 'Branch', worktree.branch || 'Detached');
-        if (worktree.path === project.path) addMetadataRow(worktreeMetadata, 'Role', 'Project path');
+        if (isProjectWorktree(worktree)) addMetadataRow(worktreeMetadata, 'Role', 'Project path');
         row.append(worktreeMetadata);
-        if (worktree.path !== project.path) {
+        if (!isProjectWorktree(worktree)) {
           row.append(makeButton(
             'Remove Worktree',
             'secondary compact',
@@ -567,7 +568,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
     idInput.value = project.id;
     pathInput.value = project.path;
     commandInput.value = project.startCommand;
-    documentObject.querySelector('#form-title').textContent = 'Edit project';
+    documentObject.querySelector('#form-title').textContent = `Edit project: ${project.name}`;
     cancelButton.hidden = false;
     pathInput.focus();
     render();
