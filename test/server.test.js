@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rename, symlink, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -207,8 +207,8 @@ test('lists and explicitly removes only unregistered worktrees under project ser
     const listed = await fetch(`${baseUrl}/api/projects/${project.id}/git/worktrees`);
     assert.equal(listed.status, 200);
     assert.deepEqual((await listed.json()).worktrees, [
-      { path: projectPath, branch: 'main' },
-      { path: worktreePath, branch: 'topic' },
+      { path: projectPath, branch: 'main', isProjectWorktree: true },
+      { path: worktreePath, branch: 'topic', isProjectWorktree: false },
     ]);
 
     const unrelatedPath = await mkdtemp(path.join(os.tmpdir(), 'dcc-unrelated-worktree-'));
@@ -266,6 +266,10 @@ test('lists and explicitly removes only unregistered worktrees under project ser
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ path: nestedProjectPath, startCommand: 'node app.js' }),
     }).then((response) => response.json());
+    const nestedWorktrees = (await fetch(`${baseUrl}/api/projects/${nestedProject.id}/git/worktrees`)
+      .then((response) => response.json())).worktrees;
+    assert.equal(nestedWorktrees.find(({ path: entryPath }) => entryPath === worktreePath).isProjectWorktree, true);
+    assert.equal(nestedWorktrees.find(({ path: entryPath }) => entryPath === projectPath).isProjectWorktree, false);
     const registeredRemoval = await fetch(`${baseUrl}/api/projects/${project.id}/git/worktrees`, {
       method: 'DELETE',
       headers: { 'content-type': 'application/json' },
@@ -285,6 +289,37 @@ test('lists and explicitly removes only unregistered worktrees under project ser
       (await fetch(`${baseUrl}/api/projects/${project.id}`).then((response) => response.json())).path,
       projectPath,
     );
+  });
+});
+
+test('identifies a registered worktree through a symlinked Git listing path', async () => {
+  await withServer(async (baseUrl, projectPath) => {
+    await execFileAsync('git', ['-C', projectPath, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+      'commit', '--allow-empty', '-qm', 'initial']);
+    await execFileAsync('git', ['-C', projectPath, 'branch', 'topic']);
+    const listedPath = `${projectPath}-listed`;
+    const registeredPath = `${projectPath}-registered`;
+    await execFileAsync('git', ['-C', projectPath, 'worktree', 'add', '-q', listedPath, 'topic']);
+    await rename(listedPath, registeredPath);
+    await symlink(registeredPath, listedPath);
+
+    const project = await fetch(`${baseUrl}/api/projects`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: registeredPath, startCommand: 'node app.js' }),
+    }).then((response) => response.json());
+    const response = await fetch(`${baseUrl}/api/projects/${project.id}/git/worktrees`);
+    assert.equal(response.status, 200);
+    const listedWorktree = (await response.json()).worktrees.find(({ path: entryPath }) => entryPath === listedPath);
+    assert.equal(listedWorktree.isProjectWorktree, true);
+
+    const removal = await fetch(`${baseUrl}/api/projects/${project.id}/git/worktrees`, {
+      method: 'DELETE',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: listedPath }),
+    });
+    assert.equal(removal.status, 409);
+    assert.equal((await removal.json()).error, 'registered_worktree');
   });
 });
 

@@ -51,6 +51,8 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
   const cancelButton = documentObject.querySelector('#cancel');
   const saveButton = documentObject.querySelector('#save-project');
   const refreshButton = documentObject.querySelector('#refresh');
+  const searchInput = documentObject.querySelector('#project-search');
+  const projectCount = documentObject.querySelector('#project-count');
 
   let projects = [];
   let loadingProjects = false;
@@ -61,6 +63,10 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
   const projectMessages = new Map();
   const branchStates = new Map();
   const worktreeStates = new Map();
+  const collapsedProjects = new Set();
+  const expandedWorktrees = new Set();
+  let activeProjectId = null;
+  const worktreePreviewLimit = 5;
 
   function actionError(label, error) {
     const kind = error instanceof ApiError && error.status >= 400 && error.status < 500
@@ -177,15 +183,21 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
         () => removeAllProjectWorktrees(project)));
       const worktreeList = documentObject.createElement('div');
       worktreeList.className = 'worktree-list';
-      for (const worktree of worktreeState.worktrees) {
+      const isProjectWorktree = (worktree) => worktree.isProjectWorktree || worktree.path === project.path;
+      const worktrees = [...worktreeState.worktrees].sort((a, b) =>
+        Number(isProjectWorktree(b)) - Number(isProjectWorktree(a)));
+      const showAll = expandedWorktrees.has(project.id);
+      const visibleWorktrees = showAll ? worktrees : worktrees.slice(0, worktreePreviewLimit);
+      for (const worktree of visibleWorktrees) {
         const row = documentObject.createElement('div');
-        row.className = 'worktree-row';
+        row.className = `worktree-row${isProjectWorktree(worktree) ? ' current-worktree' : ''}`;
         const worktreeMetadata = documentObject.createElement('dl');
         worktreeMetadata.className = 'git-metadata worktree-metadata';
         addMetadataRow(worktreeMetadata, 'Path', worktree.path);
         addMetadataRow(worktreeMetadata, 'Branch', worktree.branch || 'Detached');
+        if (isProjectWorktree(worktree)) addMetadataRow(worktreeMetadata, 'Role', 'Project worktree');
         row.append(worktreeMetadata);
-        if (worktree.path !== project.path) {
+        if (!isProjectWorktree(worktree)) {
           row.append(makeButton(
             'Remove Worktree',
             'secondary compact',
@@ -196,6 +208,17 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
         worktreeList.append(row);
       }
       section.append(worktreeList);
+      if (worktrees.length > worktreePreviewLimit) {
+        section.append(makeButton(
+          showAll ? 'Show fewer worktrees' : `Show all ${worktrees.length} worktrees`,
+          'secondary compact worktree-toggle', false,
+          () => {
+            if (showAll) expandedWorktrees.delete(project.id);
+            else expandedWorktrees.add(project.id);
+            render();
+          },
+        ));
+      }
     } else {
       const worktreeMessage = documentObject.createElement('p');
       worktreeMessage.className = `inline-message ${worktreeState?.status === 'error' ? 'error' : 'unavailable'}`;
@@ -220,18 +243,39 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
     saveButton.disabled = loadingProjects || savingProject
       || Boolean(idInput.value && pendingProjects.has(idInput.value));
     cancelButton.disabled = savingProject;
+    const query = searchInput.value.trim().toLocaleLowerCase();
+    const visibleProjects = projects.filter((project) =>
+      `${project.name} ${project.path}`.toLocaleLowerCase().includes(query));
+    projectCount.textContent = `${visibleProjects.length} of ${projects.length} projects shown`;
     if (!projects.length) {
       projectsElement.innerHTML = '<p class="empty">No projects registered yet.</p>';
       return;
     }
-    projectsElement.replaceChildren(...projects.map((project) => {
+    if (!visibleProjects.length) {
+      projectsElement.innerHTML = '<p class="empty">No projects match your search.</p>';
+      return;
+    }
+    projectsElement.replaceChildren(...visibleProjects.map((project) => {
       const busy = loadingProjects || pendingProjects.has(project.id)
         || savingProjectId === project.id;
       const article = documentObject.createElement('article');
-      article.className = 'project';
+      article.className = `project${activeProjectId === project.id ? ' active-project' : ''}`;
       article.setAttribute('aria-busy', String(busy));
+      const header = documentObject.createElement('div');
+      header.className = 'project-heading';
       const heading = documentObject.createElement('h3');
       heading.textContent = project.name;
+      const toggle = makeButton(
+        collapsedProjects.has(project.id) ? 'Expand project' : 'Collapse project',
+        'secondary compact', false,
+        () => {
+          if (collapsedProjects.has(project.id)) collapsedProjects.delete(project.id);
+          else collapsedProjects.add(project.id);
+          render();
+        },
+      );
+      toggle.setAttribute('aria-expanded', String(!collapsedProjects.has(project.id)));
+      header.append(heading, toggle);
       const pathLine = documentObject.createElement('div');
       const pathCode = documentObject.createElement('code');
       pathCode.textContent = project.path;
@@ -251,7 +295,14 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
         makeButton('Edit', 'secondary', busy || project.status === 'running', () => editProject(project)),
         makeButton('Delete', 'secondary', busy || project.status === 'running', () => deleteProject(project)),
       );
-      article.append(heading, status, pathLine, command, actions, renderGit(project, busy));
+      article.append(header, status, pathLine);
+      if (activeProjectId === project.id) {
+        const active = documentObject.createElement('span');
+        active.className = 'active-label';
+        active.textContent = 'Current target';
+        article.append(active);
+      }
+      if (!collapsedProjects.has(project.id)) article.append(command, actions, renderGit(project, busy));
       const projectMessage = projectMessages.get(project.id);
       if (projectMessage) {
         const feedback = documentObject.createElement('p');
@@ -334,6 +385,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
   async function performProjectAction(project, label, request, includeBranches) {
     const affectedProjects = includeBranches ? projectsSharingRepository(project) : [project];
     if (projectsAreBusy(affectedProjects)) return;
+    activeProjectId = project.id;
     for (const { id } of affectedProjects) pendingProjects.add(id);
     projectMessages.set(project.id, { text: `${label} in progress…`, error: false });
     render();
@@ -393,6 +445,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
     const affectedProjects = projectsSharingRepository(project);
     if (projectsAreBusy(affectedProjects)
       || !confirmImpl(`Remove worktree at ${worktree.path} (${worktree.branch || 'Detached'})? Branch Switch will not run automatically.`)) return;
+    activeProjectId = project.id;
     for (const { id } of affectedProjects) pendingProjects.add(id);
     projectMessages.set(project.id, { text: 'Remove worktree in progress…', error: false });
     render();
@@ -427,6 +480,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
   async function removeAllProjectWorktrees(project) {
     const affectedProjects = projectsSharingRepository(project);
     if (projectsAreBusy(affectedProjects)) return;
+    activeProjectId = project.id;
     for (const { id } of affectedProjects) pendingProjects.add(id);
     render();
     try {
@@ -460,6 +514,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
   async function refreshGit(project) {
     const affectedProjects = projectsSharingRepository(project);
     if (projectsAreBusy(affectedProjects)) return;
+    activeProjectId = project.id;
     for (const { id } of affectedProjects) pendingProjects.add(id);
     projectMessages.set(project.id, { text: 'Refreshing Git state…', error: false });
     render();
@@ -486,6 +541,9 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
       for (const id of branchStates.keys()) if (!projectIds.has(id)) branchStates.delete(id);
       for (const id of worktreeStates.keys()) if (!projectIds.has(id)) worktreeStates.delete(id);
       for (const id of projectMessages.keys()) if (!projectIds.has(id)) projectMessages.delete(id);
+      for (const id of collapsedProjects) if (!projectIds.has(id)) collapsedProjects.delete(id);
+      for (const id of expandedWorktrees) if (!projectIds.has(id)) expandedWorktrees.delete(id);
+      if (activeProjectId && !projectIds.has(activeProjectId)) activeProjectId = null;
       render();
       await Promise.all(projects
         .filter((project) => project.git?.isRepository)
@@ -506,12 +564,14 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
 
   function editProject(project) {
     if (loadingProjects || pendingProjects.has(project.id) || savingProjectId === project.id) return;
+    activeProjectId = project.id;
     idInput.value = project.id;
     pathInput.value = project.path;
     commandInput.value = project.startCommand;
-    documentObject.querySelector('#form-title').textContent = 'Edit project';
+    documentObject.querySelector('#form-title').textContent = `Edit project: ${project.name}`;
     cancelButton.hidden = false;
     pathInput.focus();
+    render();
   }
 
   function resetForm() {
@@ -524,6 +584,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
   async function deleteProject(project) {
     if (loadingProjects || pendingProjects.has(project.id) || savingProjectId === project.id
       || !confirmImpl(`Delete ${project.name}?`)) return;
+    activeProjectId = project.id;
     pendingProjects.add(project.id);
     projectMessages.set(project.id, { text: 'Delete in progress…', error: false });
     render();
@@ -573,6 +634,7 @@ export function initDashboard(documentObject = document, fetchImpl = fetch, conf
   });
 
   cancelButton.addEventListener('click', resetForm);
+  searchInput.addEventListener('input', render);
   refreshButton.addEventListener('click', () => loadProjects());
   const ready = loadProjects();
   return { ready };

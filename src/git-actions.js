@@ -239,6 +239,26 @@ export async function listWorktrees(repositoryPath) {
   }
 }
 
+function pathContains(rootPath, candidatePath) {
+  const relativePath = path.relative(rootPath, candidatePath);
+  return relativePath === '' || (relativePath !== '..'
+    && !relativePath.startsWith(`..${path.sep}`) && !path.isAbsolute(relativePath));
+}
+
+export async function listProjectWorktrees(projectPath) {
+  const worktrees = await listWorktrees(projectPath);
+  const canonicalProjectPath = await realpath(projectPath);
+  return Promise.all(worktrees.map(async (worktree) => {
+    let isProjectWorktree = false;
+    try {
+      isProjectWorktree = pathContains(await realpath(worktree.path), canonicalProjectPath);
+    } catch {
+      // Missing worktrees remain visible but cannot contain the project.
+    }
+    return { ...worktree, isProjectWorktree };
+  }));
+}
+
 async function removableWorktree(repositoryPath, worktreePath, protectedPaths) {
   await requireRepository(repositoryPath);
   if (typeof worktreePath !== 'string' || !worktreePath) {
@@ -269,9 +289,7 @@ async function removableWorktree(repositoryPath, worktreePath, protectedPaths) {
     } catch {
       canonicalProtectedPath = path.resolve(protectedPath);
     }
-    const relativePath = path.relative(worktree.canonicalPath, canonicalProtectedPath);
-    if (relativePath === '' || (!relativePath.startsWith(`..${path.sep}`) && relativePath !== '..'
-      && !path.isAbsolute(relativePath))) {
+    if (pathContains(worktree.canonicalPath, canonicalProtectedPath)) {
       throw new ProjectError('registered_worktree', 'A registered project uses this Git worktree.');
     }
   }
